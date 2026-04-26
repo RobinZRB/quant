@@ -83,6 +83,61 @@
                     </div>
                 </div>
 
+                <div class="action-card" id="batch-download">
+                    <div class="action-card-header">
+                        <div class="action-card-icon data"><i class="fas fa-layer-group"></i></div>
+                        <div>
+                            <h5 class="action-card-title">批量下载 A股</h5>
+                            <p class="action-card-subtitle">获取全市场A股列表并批量下载K线数据</p>
+                        </div>
+                    </div>
+                    <div class="action-card-body">
+                        <div class="form-grid">
+                            <div class="modern-form-group" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+                                <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:#b0b0b0;white-space:nowrap;">
+                                    <input type="checkbox" id="exclude3xx" checked> 排除创业板(3xx)
+                                </label>
+                                <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:#b0b0b0;white-space:nowrap;">
+                                    <input type="checkbox" id="excludeST" checked> 排除ST
+                                </label>
+                                <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:#b0b0b0;white-space:nowrap;">
+                                    <input type="checkbox" id="excludeDelisted" checked> 排除退市
+                                </label>
+                                <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:#b0b0b0;white-space:nowrap;">
+                                    <input type="checkbox" id="excludeMainBoard" onchange="renderStockList()"> 剔除主板
+                                </label>
+                                <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:#b0b0b0;white-space:nowrap;">
+                                    <input type="checkbox" id="excludeSTAR" onchange="renderStockList()"> 剔除科创板
+                                </label>
+                            </div>
+                            <div class="modern-form-group">
+                                <label class="modern-label"><i class="fas fa-filter"></i>仅保留前缀(逗号分隔)</label>
+                                <input type="text" class="modern-input" id="includePrefix" placeholder="如: 600,601,603">
+                            </div>
+                            <div class="modern-form-group col-span-2" style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button type="button" class="modern-btn modern-btn-secondary" onclick="fetchStockList()">
+                                    <i class="fas fa-search"></i> 获取A股列表
+                                </button>
+                                <button type="button" id="checkIntegrityBtn" class="modern-btn modern-btn-secondary" onclick="checkDataIntegrity()">
+                                    <i class="fas fa-check-double"></i> 检查数据完整性
+                                </button>
+                                <button type="button" id="batchDownloadBtn" class="modern-btn modern-btn-primary" onclick="startBatchDownload()" disabled>
+                                    <i class="fas fa-download"></i> 批量下载
+                                </button>
+                                <button type="button" id="batchCancelBtn" class="modern-btn modern-btn-danger" onclick="cancelBatchDownload()" style="display:none;">
+                                    <i class="fas fa-stop"></i> 取消下载
+                                </button>
+                                <button type="button" id="batchResumeBtn" class="modern-btn modern-btn-secondary" onclick="resumeDownload()" style="display:none;">
+                                    <i class="fas fa-redo"></i> 恢复下载
+                                </button>
+                            </div>
+                        </div>
+                        <div id="stockListInfo" class="mt-2" style="font-size:13px;color:#b0b0b0;"></div>
+                        <div id="stockListTable" class="mt-2" style="max-height:400px;overflow-y:auto;display:none;"></div>
+                        <div id="batchDownloadProgress" class="mt-2"></div>
+                    </div>
+                </div>
+
                 <div class="action-card" id="backtest">
                     <div class="action-card-header">
                         <div class="action-card-icon backtest"><i class="fas fa-robot"></i></div>
@@ -138,6 +193,14 @@
                                         </div>
                                     </div>
                                 </div>
+                                <div class="modern-form-group col-span-2" id="batchDateRange" style="display:none;">
+                                    <label class="modern-label"><i class="fas fa-calendar-range"></i>回测日期范围 <span style="font-size:11px;color:#888;">(可选，留空则用完整数据)</span></label>
+                                    <div style="display:flex;gap:8px;align-items:center;">
+                                        <input type="date" class="modern-input" id="cutStart">
+                                        <span style="color:#888;">至</span>
+                                        <input type="date" class="modern-input" id="cutEnd">
+                                    </div>
+                                </div>
                                 <div class="modern-form-group col-span-2">
                                     <button type="submit" class="modern-btn modern-btn-primary">
                                         <i class="fas fa-play"></i>开始回测
@@ -147,6 +210,7 @@
                         </form>
                         <div id="resultMessage" class="mt-3"></div>
                         <div id="resultView" class="mt-3"></div>
+                        <div id="batchResultView" class="mt-3" style="display:none;"></div>
                         <div class="result-message info mt-3" style="font-size: 12px;">
                             <i class="fas fa-info-circle"></i>
                             <span>更多配置（费率、滑点等）请在 settings 文件中配置，暂不支持单独配置</span>
@@ -168,15 +232,6 @@
                         <div class="filter-item-custom">
                             <label><i class="fas fa-search"></i></label>
                             <input type="text" class="filter-input" id="stockFilter" placeholder="股票名称" oninput="debounceFilter()">
-                        </div>
-                        <div class="filter-item-custom">
-                            <label><i class="fas fa-database"></i></label>
-                            <select class="filter-select" id="sourceFilter">
-                                <option value="">数据源</option>
-                                {% for source in data_sources %}
-                                <option value="{{ source }}">{{ source }}</option>
-                                {% endfor %}
-                            </select>
                         </div>
                         <div class="filter-item-custom">
                             <label><i class="fas fa-brain"></i></label>
@@ -238,9 +293,9 @@
                         <thead>
                             <tr>
                                 <th><i class="fas fa-hashtag me-1"></i>序号</th>
-                                <th><i class="fas fa-chart-bar me-1"></i>股票</th>
-                                <th><i class="fas fa-database me-1"></i>数据源</th>
                                 <th><i class="fas fa-brain me-1"></i>策略</th>
+                                <th><i class="fas fa-clock me-1"></i>时间戳</th>
+                                <th><i class="fas fa-chart-bar me-1"></i>股票</th>
                                 <th><i class="fas fa-clock me-1"></i>运行时间</th>
                                 <th><i class="fas fa-cog me-1"></i>操作</th>
                             </tr>
@@ -548,6 +603,7 @@
 
         function updateStockSelectState() {
             const isBatch = document.getElementById('batchTest').checked;
+            document.getElementById('batchDateRange').style.display = isBatch ? 'block' : 'none';
             if (isBatch) {
                 stockSearch.disabled = true;
                 stockSearch.placeholder = '批量模式无需选择';
@@ -565,6 +621,8 @@
 
             const resultMessage = document.getElementById('resultMessage');
             const resultView = document.getElementById('resultView');
+            const batchResultView = document.getElementById('batchResultView');
+            const isBatch = document.getElementById('batchTest').checked;
 
             resultMessage.innerHTML = `
                 <div class="result-message info">
@@ -573,33 +631,98 @@
                 </div>
             `;
             resultView.innerHTML = '';
+            batchResultView.innerHTML = '';
+            batchResultView.style.display = 'none';
+
+            const body = {
+                source: document.getElementById('dataSource').value,
+                stock_file: document.getElementById('stockFile').value,
+                is_batch: isBatch,
+                init_cash: document.getElementById('initCash').value,
+                strategy: document.getElementById('strategy').value
+            };
+            if (isBatch) {
+                body.cut_start = document.getElementById('cutStart').value || null;
+                body.cut_end = document.getElementById('cutEnd').value || null;
+            }
 
             fetch('/run_backtest', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    source: document.getElementById('dataSource').value,
-                    stock_file: document.getElementById('stockFile').value,
-                    is_batch: document.getElementById('batchTest').checked,
-                    init_cash: document.getElementById('initCash').value,
-                    strategy: document.getElementById('strategy').value
-                })
+                body: JSON.stringify(body)
             })
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    resultMessage.innerHTML = `
-                        <div class="result-message success">
-                            <i class="fas fa-check-circle"></i>
-                            <span>${data.message}</span>
-                        </div>
-                    `;
-                    if (!document.getElementById('batchTest').checked && data.data.result_path) {
-                        resultView.innerHTML = `
-                            <a href="/show_result/${data.data.result_path}" target="_blank" class="view-btn">
-                                <i class="fas fa-chart-line"></i> 查看回测结果
-                            </a>
+                    if (isBatch && data.data.summary) {
+                        const s = data.data.summary;
+                        resultMessage.innerHTML = `
+                            <div class="result-message success">
+                                <i class="fas fa-check-circle"></i>
+                                <span>批量回测完成: ${s.success_count}/${s.stock_count} 成功</span>
+                            </div>
                         `;
+                        let summaryHtml = '<div class="table-container mt-3"><div class="table-header-custom"><div class="table-title"><i class="fas fa-chart-pie"></i>批量汇总统计</div></div>';
+                        summaryHtml += '<div class="stats-row">';
+                        summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon blue"><i class="fas fa-percent"></i></div><div><div class="mini-stat-value">${s.weighted_win_rate_pct}%</div><div class="mini-stat-label">加权胜率</div></div></div>`;
+                        summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon green"><i class="fas fa-balance-scale"></i></div><div><div class="mini-stat-value">${s.weighted_profit_factor}</div><div class="mini-stat-label">加权盈亏比</div></div></div>`;
+                        summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon orange"><i class="fas fa-exchange-alt"></i></div><div><div class="mini-stat-value">${s.total_trades_all}</div><div class="mini-stat-label">总交易次数</div></div></div>`;
+                        summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon purple"><i class="fas fa-calendar-alt"></i></div><div><div class="mini-stat-value">${s.avg_trades_per_year}</div><div class="mini-stat-label">年均交易次数</div></div></div>`;
+                        summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon green"><i class="fas fa-clock"></i></div><div><div class="mini-stat-value">${s.avg_holding_days}天</div><div class="mini-stat-label">平均持仓天数</div></div></div>`;
+                        if (s.equal_weight) {
+                            summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon blue"><i class="fas fa-chart-line"></i></div><div><div class="mini-stat-value">${s.equal_weight.avg_annual_return_pct}%</div><div class="mini-stat-label">等权年化收益</div></div></div>`;
+                        }
+                        summaryHtml += '</div>';
+                        if (data.data.batch_dir) {
+                            summaryHtml += `<div style="padding:12px;font-size:13px;color:#b0b0b0;">结果目录: ${data.data.batch_dir}</div>`;
+                        }
+                        summaryHtml += '</div>';
+
+                        // per-stock table
+                        if (data.data.results && data.data.results.length > 0) {
+                            summaryHtml += '<div class="table-container mt-3"><div class="table-header-custom"><div class="table-title"><i class="fas fa-list"></i>各股票明细</div></div>';
+                            summaryHtml += '<div class="table-responsive"><table class="data-table-custom"><thead><tr>';
+                            ['代码','名称','收益%','回撤%','交易','胜率%','盈亏比','持仓天','状态'].forEach(h => summaryHtml += `<th>${h}</th>`);
+                            summaryHtml += '</tr></thead><tbody>';
+                            data.data.results.forEach(r => {
+                                const color = r.total_return_pct >= 0 ? '#ff6b6b' : '#4ecdc4';
+                                summaryHtml += `<tr>
+                                    <td>${r.stock_code}</td><td>${r.stock_name}</td>
+                                    <td style="color:${color}">${r.total_return_pct}%</td><td>${r.max_drawdown_pct}%</td>
+                                    <td>${r.total_trades}</td><td>${r.win_rate_pct}%</td><td>${r.profit_factor}</td>
+                                    <td>${r.avg_holding_days}</td><td>${r.success ? '<span style="color:#2ecc71">✓</span>' : '<span style="color:#e74c3c">✗</span>'}</td>
+                                </tr>`;
+                            });
+                            summaryHtml += '</tbody></table></div></div>';
+                        }
+                        batchResultView.innerHTML = summaryHtml;
+                        batchResultView.style.display = 'block';
+                        scrollToSection('backtest');
+                    } else {
+                        resultMessage.innerHTML = `
+                            <div class="result-message success">
+                                <i class="fas fa-check-circle"></i>
+                                <span>${data.message}</span>
+                            </div>
+                        `;
+                        if (data.data.result_path) {
+                            resultView.innerHTML = `
+                                <a href="/show_result/${data.data.result_path}" target="_blank" class="view-btn">
+                                    <i class="fas fa-chart-line"></i> 查看回测结果
+                                </a>
+                            `;
+                        }
+                        if (data.data.metrics) {
+                            const m = data.data.metrics;
+                            resultView.innerHTML += `
+                                <div class="stats-row mt-3">
+                                    <div class="mini-stat"><div class="mini-stat-icon blue"><i class="fas fa-percent"></i></div><div><div class="mini-stat-value">${m.total_return_pct}%</div><div class="mini-stat-label">总收益</div></div></div>
+                                    <div class="mini-stat"><div class="mini-stat-icon green"><i class="fas fa-calendar"></i></div><div><div class="mini-stat-value">${m.annual_return_pct}%</div><div class="mini-stat-label">年化</div></div></div>
+                                    <div class="mini-stat"><div class="mini-stat-icon orange"><i class="fas fa-chart-area"></i></div><div><div class="mini-stat-value">${m.max_drawdown_pct}%</div><div class="mini-stat-label">最大回撤</div></div></div>
+                                    <div class="mini-stat"><div class="mini-stat-icon purple"><i class="fas fa-exchange-alt"></i></div><div><div class="mini-stat-value">${m.total_trades}</div><div class="mini-stat-label">交易次数</div></div></div>
+                                </div>
+                            `;
+                        }
                     }
                     loadResults(1);
                 } else {
@@ -634,16 +757,14 @@
 
         function loadResults(page = 1) {
             const stockFilter = document.getElementById('stockFilter')?.value || '';
-            const sourceFilter = document.getElementById('sourceFilter')?.value || '';
+            const strategyFilter = document.getElementById('strategyFilter')?.value || '';
             const dateFilterStart = document.getElementById('dateFilterStart')?.value || '';
             const dateFilterEnd = document.getElementById('dateFilterEnd')?.value || '';
-            const strategyFilter = document.getElementById('strategyFilter')?.value || '';
 
             const params = new URLSearchParams();
             params.append('page', page);
             params.append('page_size', pageSize);
             if (stockFilter) params.append('stock', stockFilter);
-            if (sourceFilter) params.append('source', sourceFilter);
             if (strategyFilter) params.append('strategy', strategyFilter);
             if (dateFilterStart) params.append('date_start', dateFilterStart);
             if (dateFilterEnd) params.append('date_end', dateFilterEnd);
@@ -670,9 +791,9 @@
                             const serialNumber = (page - 1) * pageSize + index + 1;
                             row.innerHTML = `
                                 <td class="text-secondary">#${serialNumber}</td>
-                                <td><strong>${result.stock}</strong></td>
-                                <td><span class="stock-badge">${result.source}</span></td>
-                                <td>${result.strategy ? `<a href="/strategy_code?strategy=${encodeURIComponent(result.strategy)}" target="_blank" class="strategy-link">${result.strategy}</a>` : '-'}</td>
+                                <td>${result.strategy || '-'}</td>
+                                <td class="text-secondary">${result.timestamp || '-'}</td>
+                                <td><strong>${result.stock}</strong>${result.has_summary ? ' <span class="stock-badge">批量</span>' : ''}</td>
                                 <td class="text-secondary">${result.run_time}</td>
                                 <td><a href="/show_result/${result.path}" target="_blank" class="view-btn"><i class="fas fa-chart-line"></i> 查看</a></td>
                             `;
@@ -723,12 +844,320 @@
 
         function resetFilters() {
             document.getElementById('stockFilter').value = '';
-            document.getElementById('sourceFilter').value = '';
+            document.getElementById('strategyFilter').value = '';
             document.getElementById('dateFilterStart').value = '';
             document.getElementById('dateFilterEnd').value = '';
-            document.getElementById('strategyFilter').value = '';
             loadResults(1);
         }
+
+        // === Batch A-share download ===
+        let downloadedStockConfigs = [];
+        let currentDownloadTaskId = null;
+        let pollTimer = null;
+        let integrityConfig = null;
+
+        function fetchStockList() {
+            const info = document.getElementById('stockListInfo');
+            const table = document.getElementById('stockListTable');
+            info.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在获取A股列表...';
+            document.getElementById('batchDownloadBtn').disabled = true;
+            table.style.display = 'none';
+
+            const params = new URLSearchParams();
+            params.append('exclude_3xx', document.getElementById('exclude3xx').checked ? '1' : '0');
+            params.append('exclude_st', document.getElementById('excludeST').checked ? '1' : '0');
+            params.append('exclude_delisted', document.getElementById('excludeDelisted').checked ? '1' : '0');
+            const prefix = document.getElementById('includePrefix').value.trim();
+            if (prefix) params.append('include_prefix', prefix);
+
+            fetch(`/api/stocks/a_stock_list?${params.toString()}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        downloadedStockConfigs = data.data.stocks || [];
+                        info.innerHTML = `<span style="color:#2ecc71;"><i class="fas fa-check-circle"></i> 获取到 <strong>${downloadedStockConfigs.length}</strong> 只股票</span>`;
+
+                        // load integrity config for color coding
+                        fetch('/api/stocks/load_config')
+                            .then(r => r.json())
+                            .then(cfg => {
+                                integrityConfig = cfg.data || null;
+                                renderStockList();
+                            })
+                            .catch(() => renderStockList());
+                    } else {
+                        info.innerHTML = `<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> ${data.message}</span>`;
+                    }
+                })
+                .catch(e => {
+                    info.innerHTML = `<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> 获取失败: ${e.message}</span>`;
+                });
+        }
+
+        function isMainBoard(code) {
+            return /^sh\.60[0135]/.test(code) || /^sz\.00[012]/.test(code);
+        }
+        function isSTAR(code) {
+            return /^sh\.688/.test(code);
+        }
+
+        function renderStockList() {
+            const table = document.getElementById('stockListTable');
+            if (downloadedStockConfigs.length === 0) {
+                table.style.display = 'none';
+                document.getElementById('batchDownloadBtn').disabled = true;
+                return;
+            }
+
+            const excludeMainBoard = document.getElementById('excludeMainBoard').checked;
+            const excludeSTAR = document.getElementById('excludeSTAR').checked;
+            const filtered = downloadedStockConfigs.filter(s => {
+                if (excludeMainBoard && isMainBoard(s.stock_code)) return false;
+                if (excludeSTAR && isSTAR(s.stock_code)) return false;
+                return true;
+            });
+
+            const stockStatus = {};
+            if (integrityConfig && integrityConfig.stocks) {
+                Object.entries(integrityConfig.stocks).forEach(([code, s]) => {
+                    if (s.is_complete && s.in_range) stockStatus[code] = 'complete';
+                    else if (s.data_days > 0) stockStatus[code] = 'incomplete';
+                    else stockStatus[code] = 'no_data';
+                });
+            }
+
+            let completeCount = 0, incompleteCount = 0, noDataCount = 0;
+            filtered.forEach(s => {
+                const v = stockStatus[s.stock_code];
+                if (v === 'complete') completeCount++;
+                else if (v === 'incomplete') incompleteCount++;
+                else if (v === 'no_data') noDataCount++;
+            });
+
+            let header = `<div style="font-size:12px;color:#b0b0b0;margin-bottom:6px;">`;
+            if (completeCount > 0) header += `<span style="color:#2ecc71;">● 完整 ${completeCount}</span> `;
+            if (incompleteCount > 0) header += `<span style="color:#f39c12;">● 不完整 ${incompleteCount}</span> `;
+            if (noDataCount > 0) header += `<span style="color:#888;">● 无数据 ${noDataCount}</span>`;
+            if (filtered.length === 0) header += '无匹配股票';
+            else if (completeCount + incompleteCount + noDataCount === 0) header += '尚未检查完整性';
+            header += `</div>`;
+
+            let html = header + '<table class="data-table-custom" style="font-size:12px;"><thead><tr><th>序号</th><th>代码</th><th>名称</th><th>状态</th><th>已有数据</th></tr></thead><tbody>';
+            filtered.forEach((s, i) => {
+                let status = stockStatus[s.stock_code];
+                let dot = '<span style="color:#888;">●</span>';
+                let statusText = '-';
+                let dateInfo = '-';
+                if (status === 'complete') { dot = '<span style="color:#2ecc71;">●</span>'; statusText = '完整'; }
+                else if (status === 'incomplete') { dot = '<span style="color:#f39c12;">●</span>'; statusText = '不完整'; }
+                else if (status === 'no_data') { dot = '<span style="color:#888;">●</span>'; statusText = '无数据'; }
+
+                if (integrityConfig && integrityConfig.stocks && integrityConfig.stocks[s.stock_code]) {
+                    const cs = integrityConfig.stocks[s.stock_code];
+                    dateInfo = cs.data_start ? `${cs.data_start} ~ ${cs.data_end} (${cs.data_days}天)` : '-';
+                }
+                html += `<tr><td>${i+1}</td><td>${s.stock_code}</td><td>${s.stock_name}</td><td>${dot} ${statusText}</td><td style="font-size:11px;color:#888;">${dateInfo}</td></tr>`;
+            });
+            html += '</tbody></table>';
+            table.innerHTML = html;
+            table.style.display = 'block';
+            scrollToSection('batch-download');
+        }
+
+        function checkDataIntegrity() {
+            const info = document.getElementById('stockListInfo');
+            info.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在扫描已有CSV检查完整性...';
+            document.getElementById('checkIntegrityBtn').disabled = true;
+
+            const today = new Date();
+            const fourYearsAgo = new Date();
+            fourYearsAgo.setFullYear(today.getFullYear() - 4);
+            const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+
+            fetch('/api/stocks/check_integrity', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    data_source: 'baostock',
+                    target_start: fmt(fourYearsAgo),
+                    target_end: fmt(today),
+                    stock_configs: downloadedStockConfigs
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('checkIntegrityBtn').disabled = false;
+                if (data.success) {
+                    integrityConfig = data.data;
+                    const s = data.data.summary;
+                    let msg = `<span style="color:#2ecc71;"><i class="fas fa-check-circle"></i> 完整性检查完成: 完整 ${s.complete} / 不完整 ${s.incomplete} / 总计 ${s.total_scanned}</span>`;
+                    if (data.plan && data.plan.skipped > 0) {
+                        msg += `<br><span style="color:#888;font-size:12px;">下载计划: 全量 ${data.plan.full} / 增量 ${data.plan.incremental} / 跳过 ${data.plan.skipped}</span>`;
+                    }
+                    info.innerHTML = msg;
+                    document.getElementById('batchDownloadBtn').disabled = false;
+                    if (downloadedStockConfigs.length > 0) renderStockList();
+                    else { info.innerHTML += '<br><span style="color:#f39c12;">请先"获取A股列表"以查看各股票状态</span>'; }
+                } else {
+                    info.innerHTML = `<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> ${data.message}</span>`;
+                }
+            })
+            .catch(e => {
+                document.getElementById('checkIntegrityBtn').disabled = false;
+                info.innerHTML = `<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> 检查失败: ${e.message}</span>`;
+            });
+        }
+
+        function cancelBatchDownload() {
+            if (!currentDownloadTaskId) return;
+            const progress = document.getElementById('batchDownloadProgress');
+            progress.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在取消...';
+            fetch(`/api/cancel_download/${currentDownloadTaskId}`, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        progress.innerHTML = '<span style="color:#f39c12;"><i class="fas fa-stop-circle"></i> 已发送取消信号，等待同步config...</span>';
+                    }
+                });
+        }
+
+        function startBatchDownload() {
+            if (downloadedStockConfigs.length === 0) return;
+            // load config for dedup
+            fetch('/api/stocks/load_config')
+                .then(r => r.json())
+                .then(cfg => {
+                    integrityConfig = cfg.data || null;
+                    launchDownload(null);
+                })
+                .catch(() => launchDownload(null));
+        }
+
+        function resumeDownload() {
+            if (!currentDownloadTaskId) return;
+            launchDownload(currentDownloadTaskId);
+        }
+
+        function launchDownload(resumeTaskId) {
+            const progress = document.getElementById('batchDownloadProgress');
+            const btn = document.getElementById('batchDownloadBtn');
+            const resumeBtn = document.getElementById('batchResumeBtn');
+            btn.disabled = true;
+            resumeBtn.style.display = 'none';
+
+            const today = new Date();
+            const fourYearsAgo = new Date();
+            fourYearsAgo.setFullYear(today.getFullYear() - 4);
+            const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+
+            progress.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在启动下载任务...';
+
+            const body = {
+                stock_configs: downloadedStockConfigs,
+                start_date: fmt(fourYearsAgo),
+                end_date: fmt(today),
+                parallel: true
+            };
+            if (resumeTaskId) body.resume_task_id = resumeTaskId;
+
+            fetch('/acquire_stock_data_batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    currentDownloadTaskId = data.data.task_id;
+                    localStorage.setItem('lastDownloadTaskId', currentDownloadTaskId);
+                    startPolling(currentDownloadTaskId);
+                } else {
+                    progress.innerHTML = `<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> ${data.message}</span>`;
+                    btn.disabled = false;
+                }
+            })
+            .catch(e => {
+                progress.innerHTML = `<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> 启动失败: ${e.message}</span>`;
+                btn.disabled = false;
+            });
+        }
+
+        function startPolling(taskId) {
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(() => pollProgress(taskId), 1000);
+        }
+
+        function pollProgress(taskId) {
+            fetch(`/api/download_progress/${taskId}?_t=${Date.now()}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) return;
+                    const p = data.data;
+                    const progress = document.getElementById('batchDownloadProgress');
+                    const pct = p.total > 0 ? Math.round(p.completed / p.total * 100) : 0;
+
+                    let html = `<div style="margin:8px 0;">
+                        <div style="display:flex;justify-content:space-between;font-size:13px;color:#b0b0b0;">
+                            <span><i class="fas fa-spinner fa-spin"></i> ${p.status === 'running' ? '下载中' : p.status === 'completed' ? '已完成' : '未找到'}</span>
+                            <span>${p.completed}/${p.total} (${pct}%) 成功:${p.success} 失败:${p.failed}</span>
+                        </div>
+                        <div style="background:#333;border-radius:4px;height:8px;margin-top:4px;overflow:hidden;">
+                            <div style="background:#2ecc71;height:100%;width:${pct}%;transition:width 0.3s;"></div>
+                        </div>`;
+
+                    if (p.current_stock) {
+                        html += `<div style="font-size:12px;color:#888;margin-top:4px;">当前: ${p.current_stock}</div>`;
+                    }
+
+                    if (p.status === 'completed') {
+                        html += `<div style="margin-top:8px;color:#2ecc71;"><i class="fas fa-check-circle"></i> 下载完成! 成功 ${p.success} 只，失败 ${p.failed} 只</div>`;
+                        clearInterval(pollTimer);
+                        pollTimer = null;
+                        document.getElementById('batchDownloadBtn').disabled = false;
+                        document.getElementById('batchCancelBtn').style.display = 'none';
+                        document.getElementById('batchResumeBtn').style.display = 'none';
+                        localStorage.removeItem('lastDownloadTaskId');
+                    } else if (p.status === 'cancelled') {
+                        html += `<div style="margin-top:8px;color:#f39c12;"><i class="fas fa-stop-circle"></i> 已取消: ${p.completed}/${p.total} (成功:${p.success} 失败:${p.failed})</div>`;
+                        clearInterval(pollTimer);
+                        pollTimer = null;
+                        document.getElementById('batchDownloadBtn').disabled = false;
+                        document.getElementById('batchCancelBtn').style.display = 'none';
+                        document.getElementById('batchResumeBtn').style.display = 'inline-block';
+                        localStorage.setItem('lastDownloadTaskId', currentDownloadTaskId);
+                    } else if (p.status === 'running') {
+                        document.getElementById('batchCancelBtn').style.display = 'inline-block';
+                        document.getElementById('batchResumeBtn').style.display = 'none';
+                    }
+
+                    html += '</div>';
+                    progress.innerHTML = html;
+                })
+                .catch(e => {
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                });
+        }
+
+        // Check for resume on page load
+        (function() {
+            const savedTaskId = localStorage.getItem('lastDownloadTaskId');
+            if (savedTaskId) {
+                fetch(`/api/download_progress/${savedTaskId}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.success && data.data && data.data.status === 'running') {
+                            currentDownloadTaskId = savedTaskId;
+                            document.getElementById('batchResumeBtn').style.display = 'inline-block';
+                            document.getElementById('batchDownloadProgress').innerHTML = '<div style="color:#f39c12;"><i class="fas fa-exclamation-triangle"></i> 检测到未完成的下载任务，点击"恢复下载"继续</div>';
+                            document.getElementById('batchDownloadBtn').disabled = true;
+                        } else if (data.success && data.data && data.data.status === 'completed') {
+                            localStorage.removeItem('lastDownloadTaskId');
+                            document.getElementById('batchDownloadProgress').innerHTML = `<div style="color:#2ecc71;"><i class="fas fa-check-circle"></i> 上次下载已完成: ${data.data.success}/${data.data.total} 成功</div>`;
+                        }
+                    });
+            }
+        })();
 
         function showNotification(message, type = 'success') {
             const notification = document.getElementById('notification');

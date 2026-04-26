@@ -101,10 +101,10 @@ def get_stock_history(stock_code, start_date, end_date, adjust_type='2'):
 
 def get_single_cn_stock_history(stock_code, start_date, end_date, adjust_type = '2', output_dir='baostock'):
     """
-    获取单只港股的历史数据并保存到CSV
+    获取单只A股的历史数据并保存到CSV
 
     参数:
-    stock_code: 股票代码（如 '00700'）
+    stock_code: 股票代码（如 'sh.600519'）
     output_dir: 输出目录
 
     返回:
@@ -113,7 +113,7 @@ def get_single_cn_stock_history(stock_code, start_date, end_date, adjust_type = 
     """
     try:
         if not init_baostock():
-            return False
+            return False, None
 
         # 获取历史数据
         df = get_stock_history(stock_code, start_date, end_date, adjust_type)
@@ -139,6 +139,94 @@ def get_single_cn_stock_history(stock_code, start_date, end_date, adjust_type = 
     finally:
         bs.logout()
         logger.info("已退出连接")
+
+
+def batch_get_cn_stock_history(stock_codes, start_date, end_date, adjust_type='2', output_dir='baostock'):
+    """
+    批量获取A股数据：登录一次，全量下载，最后登出。
+    避免每只股票反复登录登出的开销。
+
+    参数:
+    stock_codes: 股票代码列表，如 ['sh.600519', 'sh.000001', ...]
+    start_date: 起始日期
+    end_date: 结束日期
+    adjust_type: 复权类型
+    output_dir: 输出目录
+
+    返回:
+    list[tuple]: [(stock_code, success: bool, csv_name: str|None, error: str|None), ...]
+    """
+    if not stock_codes:
+        return []
+
+    if not init_baostock():
+        return [(code, False, None, "baostock登录失败") for code in stock_codes]
+
+    results = []
+    total = len(stock_codes)
+    try:
+        os.makedirs(os.path.join(stock_data_root, output_dir), exist_ok=True)
+        for i, code in enumerate(stock_codes):
+            try:
+                df = get_stock_history(code, start_date, end_date, adjust_type)
+                if df is not None and not df.empty:
+                    stock_name = df['stock_name'].iloc[0]
+                    start_fmt = df['date'].min().strftime('%Y%m%d')
+                    end_fmt = df['date'].max().strftime('%Y%m%d')
+                    csv_name = f"{code}_{stock_name}_{start_fmt}_{end_fmt}.csv"
+                    filename = os.path.join(stock_data_root, output_dir, csv_name)
+                    save_to_csv(df.round(2), filename)
+                    results.append((code, True, csv_name, None))
+                    logger.info(f"[{i+1}/{total}] {code} 下载成功")
+                else:
+                    results.append((code, False, None, "无数据"))
+                    logger.warning(f"[{i+1}/{total}] {code} 无数据")
+            except Exception as e:
+                logger.error(f"[{i+1}/{total}] {code} 下载异常: {e}")
+                results.append((code, False, None, str(e)))
+        return results
+    finally:
+        bs.logout()
+        logger.info("批量下载完成，已退出baostock连接")
+
+
+def _merge_into_csv(csv_path, stock_code, missing_ranges, adjust_type='2'):
+    existing = pd.read_csv(csv_path, parse_dates=['date'], encoding='utf-8-sig')
+    existing_cols = list(existing.columns)
+
+    new_frames = []
+    for start, end in missing_ranges:
+        df = get_stock_history(stock_code, start, end, adjust_type)
+        if df is not None and not df.empty:
+            new_frames.append(df)
+
+    if not new_frames:
+        return False
+
+    new_data = pd.concat(new_frames, ignore_index=True)
+    new_data = new_data.reindex(columns=existing_cols)
+    merged = pd.concat([existing, new_data], ignore_index=True)
+    merged = merged.drop_duplicates(subset=['date'], keep='last')
+    merged = merged.sort_values('date').reset_index(drop=True)
+    merged.to_csv(csv_path, index=False, encoding='utf-8-sig')
+    return True
+
+
+def incremental_download_stock(
+    csv_path: str,
+    stock_code: str,
+    missing_ranges: list,
+    adjust_type: str = '2',
+) -> bool:
+    if not missing_ranges or not os.path.exists(csv_path):
+        return False
+
+    if not init_baostock():
+        return False
+    try:
+        return _merge_into_csv(csv_path, stock_code, missing_ranges, adjust_type)
+    finally:
+        bs.logout()
 
 
 

@@ -475,6 +475,8 @@ button:focus, select:focus, input:focus { outline: 2px solid var(--accent-color)
 .modern-btn-primary:active { transform: translateY(0); }
 .modern-btn-secondary { background: var(--surface-color); color: var(--text-color); border: 1px solid var(--border-color); box-shadow: none; }
 .modern-btn-secondary:hover { background: var(--hover-color); border-color: var(--accent-color); color: white; }
+.modern-btn-danger { background: linear-gradient(135deg, var(--danger-color), #c0392b); color: white; box-shadow: 0 4px 15px rgba(231, 76, 60, 0.3); }
+.modern-btn-danger:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(231, 76, 60, 0.5); }
 .radio-group { display: flex; gap: 20px; }
 .radio-item { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .radio-item input { width: 18px; height: 18px; accent-color: var(--accent-color); }

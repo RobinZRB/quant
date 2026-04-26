@@ -12,6 +12,7 @@ import multiprocessing
 import secrets
 from datetime import datetime
 from functools import wraps
+from pathlib import Path
 from core.ai.ai_manager import AIManager
 
 from core.signal.signal_handler import signal_get, signals_analyze
@@ -26,10 +27,13 @@ import json
 from common.util_csv import combine_data, read_data
 from common.util_html import signals_to_html
 from core.stock import manager_baostock, manager_akshare, manager_futu
+from core.stock.stock_filter import get_filtered_stock_configs
+from core.stock.data_integrity import check_integrity as do_check_integrity, load_config as load_integrity_config, get_incomplete_stocks_for_download
+from core.stock.manager_batch import start_batch_download, get_download_progress, batch_download_stocks, cancel_download
 from core.strategy.strategy_manager import global_strategy_manager
 from common.logger import create_log
 from core.quant.quant_manage import run_backtest_enhanced_volume_strategy, run_backtest_enhanced_volume_strategy_multi
-from settings import stock_data_root, html_root, signals_root
+from settings import stock_data_root, html_root, signals_root, result_root, project_root
 
 # 初始化Flask应用
 app = Flask(__name__)
@@ -200,13 +204,37 @@ def run_backtest():
             return error_response
 
         if is_batch:
-            # 批量回测
             folder_path = stock_data_root / source
-            run_backtest_enhanced_volume_strategy_multi(str(folder_path), strategy_class, init_cash)
+            cut_start = data.get('cut_start', None)
+            cut_end = data.get('cut_end', None)
+            cut_date_range = (cut_start, cut_end) if cut_start or cut_end else None
+            result_list, summary, batch_dir = run_backtest_enhanced_volume_strategy_multi(
+                str(folder_path), strategy_class, init_cash, cut_date_range=cut_date_range
+            )
             response_data = {
                 'success': True,
                 'message': 'Batch backtest completed',
-                'data':{}
+                'data': {
+                    'results': [{
+                        'stock_code': r.stock_code,
+                        'stock_name': r.stock_name,
+                        'market': r.market,
+                        'success': r.success,
+                        'total_return_pct': round(r.total_return_pct, 2),
+                        'annual_return_pct': round(r.annual_return_pct, 2),
+                        'max_drawdown_pct': round(r.max_drawdown_pct, 2),
+                        'sharpe_ratio': round(r.sharpe_ratio, 2),
+                        'total_trades': r.total_trades,
+                        'won_trades': r.won_trades,
+                        'lost_trades': r.lost_trades,
+                        'win_rate_pct': round(r.win_rate_pct, 2),
+                        'profit_factor': round(r.profit_factor, 2),
+                        'avg_holding_days': round(r.avg_holding_days, 1),
+                        'error': r.error,
+                    } for r in result_list],
+                    'summary': summary,
+                    'batch_dir': batch_dir,
+                }
             }
             response = make_response(json.dumps(response_data, ensure_ascii=False))
             response.headers['Content-Type'] = 'application/json; charset=utf-8'
@@ -220,30 +248,31 @@ def run_backtest():
                 return error_response
 
             file_path = stock_data_root / source / stock_file
-            run_backtest_enhanced_volume_strategy(str(file_path), strategy_class, init_cash)
+            result = run_backtest_enhanced_volume_strategy(str(file_path), strategy_class, init_cash)
 
-            # 构建回测结果的HTML路径，添加策略名称作为最后一层
-            relative_path = f"{source}/{stock_file.rsplit('.', 1)[0]}/{strategy_class.__name__}"
-            # 查找最新的回测结果文件
-            result_dir = html_root / source / stock_file.rsplit('.', 1)[0] / strategy_class.__name__
-            if os.path.exists(result_dir):
-                files = sorted(os.listdir(result_dir), reverse=True)
-                if files:
-                    latest_file = files[0]
-                    result_path = f"{relative_path}/{latest_file}"
-
-                    response_data = {
-                        'success': True,
-                        'message': 'Backtest completed',
-                        'data':{
-                            'result_path': result_path
+            if result.success and result.html_path:
+                relative_path = str(Path(result.html_path).relative_to(project_root))
+                response_data = {
+                    'success': True,
+                    'message': 'Backtest completed',
+                    'data': {
+                        'result_path': relative_path,
+                        'metrics': {
+                            'total_return_pct': round(result.total_return_pct, 2),
+                            'annual_return_pct': round(result.annual_return_pct, 2),
+                            'max_drawdown_pct': round(result.max_drawdown_pct, 2),
+                            'sharpe_ratio': round(result.sharpe_ratio, 2),
+                            'total_trades': result.total_trades,
+                            'win_rate_pct': round(result.win_rate_pct, 2),
+                            'profit_factor': round(result.profit_factor, 2),
                         }
                     }
-                    response = make_response(json.dumps(response_data, ensure_ascii=False))
-                    response.headers['Content-Type'] = 'application/json; charset=utf-8'
-                    return response
+                }
+                response = make_response(json.dumps(response_data, ensure_ascii=False))
+                response.headers['Content-Type'] = 'application/json; charset=utf-8'
+                return response
             else:
-                response_data = {'success': False, 'message': 'No result files found', 'data': {}}
+                response_data = {'success': False, 'message': result.error or 'Backtest failed', 'data': {}}
                 response = make_response(json.dumps(response_data, ensure_ascii=False))
                 response.headers['Content-Type'] = 'application/json; charset=utf-8'
                 return response
@@ -281,81 +310,66 @@ def get_music_list():
 @app.route('/get_backtest_results')
 @log_request_details
 def get_backtest_results():
-    """获取所有回测结果"""
+    """获取所有回测结果 (results/ 目录结构: strategy/timestamp/stock/chart.html)"""
     results = []
     try:
-        # 获取分页和筛选参数
         page = int(request.args.get('page', 1))
         page_size = int(request.args.get('page_size', 20))
         start_idx = (page - 1) * page_size
 
-        # 获取筛选参数
         stock_filter = request.args.get('stock', '')
-        source_filter = request.args.get('source', '')
         date_start = request.args.get('date_start', '')
         date_end = request.args.get('date_end', '')
         strategy_filter = request.args.get('strategy', '')
 
-        # 遍历所有数据源
-        for source in DATA_SOURCES:
-            # 应用数据源筛选
-            if source_filter and source != source_filter:
-                continue
-
-            source_path = html_root / source
-            if os.path.exists(source_path):
-                for stock_dir in os.listdir(source_path):
-                    # 应用股票筛选
-                    if stock_filter and stock_filter.lower() not in stock_dir.lower():
+        if os.path.exists(result_root):
+            for strategy_dir in sorted(os.listdir(result_root)):
+                if strategy_filter and strategy_dir != strategy_filter:
+                    continue
+                strategy_path = result_root / strategy_dir
+                if not os.path.isdir(strategy_path):
+                    continue
+                for timestamp_dir in sorted(os.listdir(strategy_path), reverse=True):
+                    timestamp_path = strategy_path / timestamp_dir
+                    if not os.path.isdir(timestamp_path):
                         continue
+                    for stock_dir in sorted(os.listdir(timestamp_path)):
+                        if stock_filter and stock_filter.lower() not in stock_dir.lower():
+                            continue
+                        stock_path = timestamp_path / timestamp_dir
+                        chart_file = stock_path / "chart.html"
+                        if not chart_file.exists():
+                            continue
 
-                    stock_path = source_path / stock_dir
-                    if os.path.isdir(stock_path):
-                        for strategy_dir in os.listdir(stock_path):
-                            # 应用策略筛选
-                            if strategy_filter and strategy_dir != strategy_filter:
-                                continue
+                        run_time_dt = datetime.fromtimestamp(os.path.getctime(str(chart_file)))
+                        run_time = run_time_dt.strftime('%Y-%m-%d %H:%M:%S')
+                        run_time_date = run_time.split(' ')[0]
 
-                            strategy_path = stock_path / strategy_dir
-                            if os.path.isdir(strategy_path):
-                                for result_file in os.listdir(strategy_path):
-                                    if result_file.endswith('.html'):
-                                        # 获取文件创建时间
-                                        file_path = strategy_path / result_file
-                                        run_time = datetime.fromtimestamp(os.path.getctime(file_path)).strftime('%Y-%m-%d %H:%M:%S')
-                                        run_time_date = run_time.split(' ')[0] if run_time else ''
+                        if date_start and run_time_date < date_start:
+                            continue
+                        if date_end and run_time_date > date_end:
+                            continue
 
-                                        # 应用日期范围筛选
-                                        if date_start and run_time_date < date_start:
-                                            continue
-                                        if date_end and run_time_date > date_end:
-                                            continue
+                        relative_path = f"{strategy_dir}/{timestamp_dir}/{stock_dir}/chart.html"
+                        summary_csv_path = timestamp_path / "batch_summary.csv"
+                        results.append({
+                            'stock': stock_dir,
+                            'strategy': strategy_dir,
+                            'timestamp': timestamp_dir,
+                            'run_time': run_time,
+                            'path': relative_path,
+                            'has_summary': summary_csv_path.exists(),
+                        })
 
-                                        # 构建结果路径
-                                        relative_path = f"{source}/{stock_dir}/{strategy_dir}/{result_file}"
-
-                                        results.append({
-                                            'stock': stock_dir,
-                                            'source': source,
-                                            'strategy': strategy_dir,
-                                            'run_time': run_time,
-                                            'path': relative_path
-                                        })
-
-        # 按运行时间降序排序
         results.sort(key=lambda x: x['run_time'], reverse=True)
-
-        # 计算总页数
         total = len(results)
         total_pages = (total + page_size - 1) // page_size
-
-        # 分页
         paginated_results = results[start_idx:start_idx + page_size]
 
         response_data = {
             'success': True,
             'message': f'Found {total} backtest results',
-            'data':{
+            'data': {
                 'results': paginated_results,
                 'page': page,
                 'total_pages': total_pages,
@@ -368,7 +382,7 @@ def get_backtest_results():
 
     except Exception as e:
         logger.error(f"Error getting backtest results: {str(e)}")
-        error_response_data = {'success': False, 'message': f'Error getting backtest results: {str(e)}', 'data':{}}
+        error_response_data = {'success': False, 'message': f'Error getting backtest results: {str(e)}', 'data': {}}
         error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
         error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
         return error_response
@@ -379,15 +393,15 @@ def get_backtest_results():
 def show_result(result_path):
     """显示回测结果图表"""
     try:
-        # 获取实际文件路径
-        actual_path = os.path.join(html_root, result_path)
+        actual_path = os.path.join(result_root, result_path)
         if not os.path.exists(actual_path):
-            error_response_data = {'success': False, 'message': 'Result file not found', 'data':{}}
+            actual_path = os.path.join(html_root, result_path)
+        if not os.path.exists(actual_path):
+            error_response_data = {'success': False, 'message': 'Result file not found', 'data': {}}
             error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
             error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
             return error_response
 
-        # 读取HTML文件内容
         with open(actual_path, 'r', encoding='utf-8') as f:
             html_content = f.read()
 
@@ -395,7 +409,7 @@ def show_result(result_path):
 
     except Exception as e:
         logger.error(f"Error showing result: {str(e)}")
-        error_response_data = {'success': False, 'message': f'Error showing result: {str(e)}', 'data':{}}
+        error_response_data = {'success': False, 'message': f'Error showing result: {str(e)}', 'data': {}}
         error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
         error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
         return error_response
@@ -581,6 +595,214 @@ def acquire_stock_data():
     except Exception as e:
         logger.error(f"获取股票数据时出错: {str(e)}")
         error_response_data = {'success': False, 'message':f'获取数据时发生错误: {str(e)},请检查股票代码是否正确或稍后重试', 'data':{}}
+        error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
+        error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return error_response
+
+
+@app.route('/api/stocks/a_stock_list', methods=['GET'])
+@log_request_details
+def get_a_stock_list():
+    """获取过滤后的A股股票列表"""
+    try:
+        exclude_indices = request.args.get('exclude_indices', '1') == '1'
+        exclude_delisted = request.args.get('exclude_delisted', '1') == '1'
+        exclude_st = request.args.get('exclude_st', '1') == '1'
+        exclude_3xx = request.args.get('exclude_3xx', '1') == '1'
+        include_prefix = request.args.get('include_prefix', '')
+
+        exclude_prefixes = ['3'] if exclude_3xx else []
+        include_prefixes = [p.strip() for p in include_prefix.split(',') if p.strip()] if include_prefix else None
+
+        configs = get_filtered_stock_configs(
+            exclude_indices=exclude_indices,
+            exclude_delisted=exclude_delisted,
+            exclude_st=exclude_st,
+            exclude_prefixes=exclude_prefixes,
+            include_prefixes=include_prefixes,
+        )
+        response_data = {
+            'success': True,
+            'message': f'获取到 {len(configs)} 只股票',
+            'data': {'stocks': configs, 'count': len(configs)}
+        }
+        response = make_response(json.dumps(response_data, ensure_ascii=False))
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
+    except Exception as e:
+        logger.error(f"获取A股列表失败: {str(e)}")
+        error_response_data = {'success': False, 'message': str(e), 'data': {}}
+        error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
+        error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return error_response
+
+
+@app.route('/api/stocks/check_integrity', methods=['POST'])
+@log_request_details
+def check_integrity():
+    """扫描已有CSV，检查数据完整性，写入config"""
+    try:
+        data = request.json or {}
+        data_source = data.get('data_source', 'baostock')
+        target_start = data.get('target_start')
+        target_end = data.get('target_end')
+        stock_configs = data.get('stock_configs', [])
+
+        config = do_check_integrity(data_source, target_start, target_end)
+
+        plan_summary = None
+        if stock_configs:
+            plan = get_incomplete_stocks_for_download(config, stock_configs, data_source)
+            plan_summary = {
+                'full': len(plan['full']),
+                'incremental': len(plan['incremental']),
+                'skipped': plan['skipped'],
+            }
+
+        response_data = {
+            'success': True,
+            'message': f"完整性检查完成: 完整={config['summary']['complete']}, 不完整={config['summary']['incomplete']}",
+            'data': config,
+            'plan': plan_summary,
+        }
+        response = make_response(json.dumps(response_data, ensure_ascii=False))
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
+    except Exception as e:
+        logger.error(f"完整性检查失败: {str(e)}")
+        error_response_data = {'success': False, 'message': str(e), 'data': {}}
+        error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
+        error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return error_response
+
+
+@app.route('/api/stocks/load_config', methods=['GET'])
+@log_request_details
+def load_config_endpoint():
+    """读取 data_integrity config"""
+    try:
+        config = load_integrity_config()
+        response_data = {'success': True, 'message': 'OK', 'data': config}
+        response = make_response(json.dumps(response_data, ensure_ascii=False))
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
+    except Exception as e:
+        logger.error(f"读取config失败: {str(e)}")
+        error_response_data = {'success': False, 'message': str(e), 'data': {}}
+        error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
+        error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return error_response
+
+
+@app.route('/api/cancel_download/<task_id>', methods=['POST'])
+@log_request_details
+def cancel_download_endpoint(task_id):
+    """取消正在进行的下载任务"""
+    try:
+        result = cancel_download(task_id)
+        if result:
+            response_data = {'success': True, 'message': '已发送取消信号，正在同步config...'}
+        else:
+            response_data = {'success': False, 'message': '任务不存在'}
+        response = make_response(json.dumps(response_data, ensure_ascii=False))
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
+    except Exception as e:
+        logger.error(f"取消下载失败: {str(e)}")
+        error_response_data = {'success': False, 'message': str(e)}
+        error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
+        error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return error_response
+
+
+@app.route('/acquire_stock_data_batch', methods=['POST'])
+@log_request_details
+def acquire_stock_data_batch():
+    """批量获取股票历史数据（异步启动，通过 task_id 轮询进度）"""
+    try:
+        data = request.json
+        stock_configs = data.get('stock_configs', [])
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        parallel = data.get('parallel', False)
+        resume_task_id = data.get('resume_task_id', None)
+
+        if not stock_configs:
+            error_response_data = {'success': False, 'message': 'stock_configs不能为空', 'data': {}}
+            error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
+            error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
+            return error_response
+
+        if resume_task_id:
+            existing = get_download_progress(resume_task_id)
+            if existing.get('status') == 'not_found':
+                resume_task_id = None
+
+        logger.info(f"启动批量下载 {len(stock_configs)} 只股票 (resume={resume_task_id})")
+
+        task_id = start_batch_download(
+            stock_configs=stock_configs,
+            start_date=start_date,
+            end_date=end_date,
+            parallel=parallel,
+            resume_task_id=resume_task_id,
+        )
+        response_data = {
+            'success': True,
+            'message': f'批量下载任务已启动，共 {len(stock_configs)} 只股票',
+            'data': {'task_id': task_id, 'total': len(stock_configs)}
+        }
+        response = make_response(json.dumps(response_data, ensure_ascii=False))
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
+    except Exception as e:
+        logger.error(f"批量下载失败: {str(e)}")
+        error_response_data = {'success': False, 'message': str(e), 'data': {}}
+        error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
+        error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return error_response
+
+
+@app.route('/api/download_progress/<task_id>', methods=['GET'])
+@log_request_details
+def get_download_progress_endpoint(task_id):
+    """查询批量下载进度"""
+    try:
+        progress = get_download_progress(task_id)
+        response = make_response(json.dumps({'success': True, 'message': 'OK', 'data': progress}, ensure_ascii=False))
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
+    except Exception as e:
+        logger.error(f"获取下载进度失败: {str(e)}")
+        error_response_data = {'success': False, 'message': str(e), 'data': {}}
+        error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
+        error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return error_response
+
+
+@app.route('/api/results/summary/<path:result_path>', methods=['GET'])
+@log_request_details
+def get_result_summary(result_path):
+    """获取批量回测的汇总JSON"""
+    try:
+        summary_file = os.path.join(result_root, result_path)
+        if not os.path.exists(summary_file):
+            error_response_data = {'success': False, 'message': 'Summary not found', 'data': {}}
+            error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
+            error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
+            return error_response
+        with open(summary_file, 'r', encoding='utf-8') as f:
+            summary_data = json.load(f)
+        response_data = {'success': True, 'message': 'OK', 'data': summary_data}
+        response = make_response(json.dumps(response_data, ensure_ascii=False))
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
+    except Exception as e:
+        logger.error(f"读取汇总失败: {str(e)}")
+        error_response_data = {'success': False, 'message': str(e), 'data': {}}
         error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
         error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
         return error_response

@@ -1,3 +1,4 @@
+import os
 import uuid
 from logging.handlers import TimedRotatingFileHandler
 from settings import log_root
@@ -5,6 +6,16 @@ import logging
 
 # 在模块级别生成全局唯一ID
 RUN_UUID = str(uuid.uuid4())
+
+
+class SafeTimedRotatingFileHandler(TimedRotatingFileHandler):
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except PermissionError:
+            self.mode = 'a'
+            self.stream = self._open()
+
 
 def create_log(name):
     # 确保日志目录存在
@@ -34,7 +45,7 @@ def create_log(name):
 
     # 创建文件处理器 - 按日期轮转，保留7天日志
     log_file = log_root / f'{name}.log'
-    file_handler = TimedRotatingFileHandler(
+    file_handler = SafeTimedRotatingFileHandler(
         filename=log_file,
         when='midnight',  # 在每天午夜轮转
         interval=1,  # 每天一个文件
