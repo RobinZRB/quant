@@ -1,0 +1,14 @@
+backtrader
+pandas
+matplotlib
+futu-api
+akshare
+mplfinance
+plotly
+bokeh
+baostock
+chardet
+flask
+flask-cors
+schedule
+weasyprint

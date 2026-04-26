@@ -1,0 +1,357 @@
+import os
+import schedule
+import time
+import datetime
+
+from common.logger import create_log
+from common.util_html import signals_to_html, save_clean_html
+from core.signal.signal_handler import signal_get, signals_analyze
+from core.stock import manager_akshare, manager_baostock, manager_futu
+from core.task.task_manager import TaskManager
+from core.task.task_execution_manager import task_execution_manager
+from core.strategy.strategy_manager import global_strategy_manager
+from core.quant.quant_manage import run_backtest_enhanced_volume_strategy
+import settings
+from core.notification.wechat_notifier import send_wechat_message, send_wechat_report_pdf
+
+logger = create_log('task_timer')
+
+scheduled_jobs = []
+
+def load_tasks():
+    """
+    从配置文件加载任务，过滤enabled为true的任务
+
+    Returns:
+        list: enabled为true的任务列表
+    """
+    try:
+        task_manager = TaskManager()
+        # 获取所有任务
+        all_tasks = task_manager.read_all()
+        # 过滤enabled为true的任务
+        enabled_tasks = [task for task in all_tasks if task.get('enabled', False) is True]
+        logger.info(f"加载了 {len(enabled_tasks)} 个启用的任务")
+        return enabled_tasks
+    except Exception as e:
+        logger.error(f"加载任务失败: {str(e)}")
+        return []
+
+
+def get_kline_data(stock_config):
+    """
+    获取历史k线数据（第一步）
+
+    Args:
+        stock_config: 股票配置，包含market, data_source, stock_code, adjust_type
+
+    Returns:
+        tuple: (success, csv_path) 成功标志和CSV文件路径
+    """
+    try:
+        market = stock_config.get('market')
+        data_source = stock_config.get('data_source')
+        stock_code = stock_config.get('stock_code')
+        adjust_type = stock_config.get('adjust_type', 'qfq')
+        logger.info(f"获取股票k线数据: market={market}, data_source={data_source}, stock_code={stock_code}, adjust_type={adjust_type}")
+        # 处理股票代码，移除市场前缀（如果有）
+        if not stock_code.startswith(f"{market.upper()}."):
+            logger.error(f"股票代码格式错误: {stock_code}, market={market}")
+            return False, None
+
+        # 计算日期范围（默认4年）
+        end_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=365 * 4)).strftime("%Y-%m-%d")
+
+        # 根据数据源和市场调用对应的函数
+        if data_source and market:
+            if data_source == 'akshare' and market.upper() == 'HK':
+                success, csv_name = manager_akshare.get_single_hk_stock_history(stock_code, start_date, end_date, adjust_type)
+            elif data_source == 'akshare' and market.upper() == 'US':
+                success, csv_name = manager_akshare.get_single_us_history(stock_code, start_date, end_date, adjust_type)
+            elif data_source == 'baostock' and market.upper() == 'CN':
+                success, csv_name = manager_baostock.get_stock_history(stock_code, start_date, end_date, adjust_type)
+            elif data_source == 'futu' and market.upper() == 'HK':
+                success, csv_name = manager_futu.get_single_hk_stock_history(stock_code, start_date, end_date, adjust_type)
+            elif data_source == 'futu' and market.upper() == 'CN':
+                success, csv_name = manager_futu.get_single_cn_stock_history(stock_code, start_date, end_date, adjust_type)
+            else:
+                logger.error(f"不支持的数据源或市场: data_source={data_source}, market={market}")
+                return False, None
+            if success and csv_name:
+                csv_path = os.path.join(settings.stock_data_root, data_source, csv_name)
+                stock_config['filename'] = csv_name
+                logger.info(f"成功获取股票数据 {stock_config.get('stock_code')}: {csv_path}")
+                return True, csv_path
+
+        logger.error(f"不支持的数据源或市场: data_source={data_source}, market={market}")
+        return False, None
+    except Exception as e:
+        logger.error(f"获取k线数据失败: {str(e)}")
+        return False, None
+
+
+def run_backtest(csv_path, backtest_config):
+    """
+    执行回测（第二步）
+
+    Args:
+        csv_path: CSV文件路径
+        backtest_config: 回测配置，包含strategy, init_cash等
+
+    Returns:
+        bool: 是否成功
+    """
+    try:
+        strategy_name = backtest_config.get('strategy', 'EnhancedVolumeStrategy')
+        init_cash = backtest_config.get('init_cash', settings.INIT_CASH)
+
+        # 获取策略类
+        strategy_class = global_strategy_manager.get_strategy(strategy_name)
+        if not strategy_class:
+            logger.error(f"未找到策略类: {strategy_name}")
+            return False
+
+        # 执行回测
+        run_backtest_enhanced_volume_strategy(csv_path, strategy_class, init_cash)
+        logger.info(f"回测完成: {csv_path}, 策略: {strategy_name}")
+        return True
+    except Exception as e:
+        logger.error(f"回测失败: {str(e)}")
+        return False
+
+
+def check_signals(target_stocks, task_id, days):
+    """
+    检查昨天买入信号
+    """
+    logger.info(f"task_id: {task_id}")
+    logger.info(f"检查信号目标股票: {target_stocks}")
+    logger.info(f"开始检查{days}天前信号")
+
+    yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+    start_day = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y-%m-%d')
+
+    try:
+        signal_files = signal_get()
+        signal_files.sort(key=lambda x: x['file_time'], reverse=True)
+        logger.info(f"获取到 {len(signal_files)} 个信号文件")
+        all_signal_files = []
+        target_signal_file = []
+        for signal_file in signal_files:
+            all_signal_files.append(signal_file['file_path'])
+        for signal_file in all_signal_files:
+            for stock in target_stocks:
+                data_source = stock["data_source"]
+                stock_file = stock["filename"]
+                if data_source in signal_file and stock_file.replace('.csv', '') in signal_file:
+                    target_signal_file.append(signal_file)
+        if len(target_signal_file) == 0:
+            for stock in target_stocks:
+                stock_file = stock["filename"]
+                logger.error(f"没有信号文件包含股票 {stock_file.replace('.csv', '')}")
+            return
+        else:
+            logger.info(f"找到 {len(target_signal_file)} 个信号文件包含目标股票")
+        filters = {
+                "start_date": start_day,
+                "end_date": yesterday,
+                "strategy_name": "",
+                "stock_code": "",
+                "signal_type": ""
+            }
+
+        combined_df = signals_analyze(target_signal_file, filters)
+        summary = {
+            'total_signals': len(combined_df),
+            'buy_signals': len(combined_df[combined_df['signal_type'].str.contains('buy')]),
+            'sell_signals': len(combined_df[combined_df['signal_type'].str.contains('sell')]),
+            'unique_stocks': combined_df['stock_info'].nunique(),
+            'unique_strategies': combined_df['strategy_name'].nunique()
+        }
+        signals = combined_df.to_dict('records')
+        total_signals_count = len(combined_df)
+        logger.info(f"昨天共有 {total_signals_count} 个信号")
+
+        # 打印每个信号
+        for signal in signals:
+            logger.debug(f"信号: 股票={signal.get('stock_info')}, 日期={signal.get('date')}, "
+                         f"信号类型={signal.get('signal_type')}, 策略={signal.get('strategy_name')}")
+        html = signals_to_html(signals, filters, summary)
+        # html_file = save_clean_html(html, task_id)
+        logger.info("成功检查昨天信号，并下载信号HTML完成")
+        return True, html
+
+    except Exception as e:
+        logger.error(f"分析信号失败: {str(e)}")
+        return False, None
+
+
+
+
+def process_task(task):
+    """
+    处理单个任务，执行三步流程
+
+    Args:
+        task: 任务配置
+    """
+    task_id = task.get('id')
+    task_name = task.get('name')
+    logger.info(f"开始处理任务: {task_name} (ID: {task_id})")
+
+    execution = task_execution_manager.create(
+        task_id=task_id,
+        task_name=task_name,
+        status='running',
+        details={'schedule_time': task.get('schedule_time')},
+        stocks=task.get('target_stocks', [])
+    )
+    if not execution:
+        logger.error(f"创建执行记录失败，跳过任务: {task_name}")
+        return
+    execution_id = execution['id']
+
+    stocks_processed = 0
+    stocks_success = 0
+    stocks_failed = 0
+
+    try:
+        target_stocks = task.get('target_stocks', [])
+        backtest_config = task.get('backtest_config', {})
+
+        for stock_config in target_stocks:
+            logger.info(f"处理股票: {stock_config.get('stock_code')}")
+
+            success, csv_path = get_kline_data(stock_config)
+            if not success or not csv_path:
+                logger.error(f"跳过股票处理，因为获取k线数据失败")
+                stocks_failed += 1
+                stocks_processed += 1
+                continue
+
+            backtest_success = run_backtest(csv_path, backtest_config)
+            if not backtest_success:
+                logger.error(f"跳过股票处理，因为回测失败")
+                stocks_failed += 1
+                stocks_processed += 1
+                continue
+
+            stocks_success += 1
+            stocks_processed += 1
+
+        success, html_content = check_signals(target_stocks, task_id, days=180)
+        if not success or not html_content:
+            logger.error(f"生成信号详情失败")
+            status = 'partial'
+        else:
+            logger.info(f"股票处理完成: {target_stocks}")
+            try:
+                send_wechat_report_pdf(
+                    html_content=html_content,
+                    title=f"定时任务{task_id}信号详情",
+                    description=f"{task}",
+                    report_filename=f"{task_id}_report.pdf"
+                )
+            except Exception as e:
+                logger.error(f"发送微信报告失败: {e}")
+            status = 'success'
+
+        task_execution_manager.update(
+            execution_id,
+            status=status,
+            stocks_processed=stocks_processed,
+            stocks_success=stocks_success,
+            stocks_failed=stocks_failed
+        )
+        logger.info(f"任务处理完成: {task_name} (ID: {task_id}), 状态: {status}, 成功: {stocks_success}/{stocks_processed}")
+    except Exception as e:
+        logger.error(f"处理任务时出错: {str(e)}")
+        task_execution_manager.update(
+            execution_id,
+            status='failed',
+            details={'error': str(e)},
+            stocks_processed=stocks_processed,
+            stocks_success=stocks_success,
+            stocks_failed=stocks_failed
+        )
+
+
+def update_schedule():
+    """
+    更新调度任务
+    """
+    global current_tasks, scheduled_jobs
+
+    # 获取新的任务列表
+    new_tasks = load_tasks()
+
+    # 清除现有的调度任务
+    for job in scheduled_jobs:
+        schedule.cancel_job(job)
+    scheduled_jobs.clear()
+
+    # 添加新的调度任务
+    for task in new_tasks:
+        schedule_time = task.get('schedule_time', '0 0 0 0 0')  # 默认每分钟执行
+        task_id = task.get('id')
+
+        # 解析cron表达式
+        try:
+            parts = schedule_time.split()
+            if len(parts) == 5:
+                minute, hour, day, month, weekday = parts
+
+                # 根据cron表达式创建定时任务
+                # 这里简化处理，实际应该更复杂地解析cron表达式
+                job = schedule.every().day.at(f"{hour}:{minute}").do(process_task, task)
+                scheduled_jobs.append(job)
+                logger.info(f"添加定时任务: {task.get('name')}, 执行时间: {schedule_time}")
+            else:
+                # 默认每分钟执行
+                job = schedule.every(1).minutes.do(process_task, task)
+                scheduled_jobs.append(job)
+                logger.info(f"添加定时任务: {task.get('name')}, 执行时间: 每分钟")
+        except Exception as e:
+            logger.error(f"解析调度时间失败: {schedule_time}, 错误: {str(e)}")
+
+    current_tasks = new_tasks
+    logger.info(f"调度任务更新完成，共 {len(scheduled_jobs)} 个任务")
+
+
+def schedule_tasks():
+    """
+    启动任务调度
+    """
+    # 初始更新调度
+    update_schedule()
+
+    # 每小时重新加载配置
+    schedule.every(1).hours.do(update_schedule)
+    logger.info("启动定时任务调度器")
+    # 每分钟更新一次调度任务配置
+    last_update_time = time.time()
+    update_interval = 60
+    # 主循环
+    while True:
+        try:
+            current_time = time.time()
+            if current_time - last_update_time >= update_interval:
+                update_schedule()
+                last_update_time = current_time
+                logger.info("更新任务配置完成")
+            schedule.run_pending()
+            time.sleep(1)
+        except Exception as e:
+            logger.error(f"调度器错误: {str(e)}")
+            time.sleep(60)  # 出错后等待一分钟再尝试
+
+
+# if __name__ == '__main__':
+#     try:
+#         logger.info("启动任务定时器")
+#         schedule_tasks()
+#     except KeyboardInterrupt:
+#         logger.info("用户中断，停止任务定时器")
+#     except Exception as e:
+#         logger.error(f"任务定时器异常: {str(e)}")

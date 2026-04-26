@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>策略代码查看 - 股票量化回测系统</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/atom-one-dark.min.css">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📈</text></svg>" type="image/svg+xml">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/languages/python.min.js"></script>
+</head>
+<body>
+    <div class="container-fluid p-0">
+        {% include 'navbar.html' %}
+
+        <div class="content pt-4">
+            <div class="page-header mb-4">
+                <div>
+                    <h1 class="page-title"><i class="fas fa-code"></i>策略代码管理</h1>
+                    <p class="page-subtitle">查看和管理交易策略与信号指标源代码</p>
+                </div>
+            </div>
+
+            <div class="card form-panel">
+                <div class="form-panel-header">
+                    <h5><i class="fas fa-file-code"></i>代码查看器</h5>
+                </div>
+                <div class="form-panel-body">
+                    <div class="nav-tabs-modern mb-4">
+                        <button class="nav-tab-item active" id="strategyTypeTab" onclick="switchTab('strategy')">
+                            <i class="fas fa-robot me-2"></i>交易策略
+                        </button>
+                        <button class="nav-tab-item" id="indicatorTypeTab" onclick="switchTab('indicator')">
+                            <i class="fas fa-chart-line me-2"></i>信号指标
+                        </button>
+                    </div>
+
+                    <div class="row mb-4">
+                        <div class="col-md-6">
+                            <label class="form-label"><i class="fas fa-list me-1"></i>选择代码</label>
+                            <select class="form-select" id="strategySelect" onchange="loadCode('strategy')">
+                                <option value="">请选择策略</option>
+                                {% for strategy in strategies %}
+                                <option value="{{ strategy }}">{{ strategy }}</option>
+                                {% endfor %}
+                            </select>
+                            <select class="form-select d-none" id="indicatorSelect" onchange="loadCode('indicator')">
+                                <option value="">请选择指标</option>
+                                {% for indicator in indicators %}
+                                <option value="{{ indicator }}">{{ indicator }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="codeLoading" class="text-center py-5 d-none">
+                        <div class="loading-spinner mx-auto mb-3"></div>
+                        <p class="text-muted">正在加载代码...</p>
+                    </div>
+
+                    <div id="codeContainer" style="display: none;">
+                        <div class="code-container">
+                            <div class="code-header">
+                                <div>
+                                    <h5 class="mb-1" id="codeName"></h5>
+                                    <small class="text-muted" id="filePath"></small>
+                                </div>
+                                <div class="code-tabs">
+                                    <button class="code-tab active" onclick="switchCodeTab('class', this)">类代码</button>
+                                    <button class="code-tab" onclick="switchCodeTab('module', this)">完整模块</button>
+                                </div>
+                                <button class="code-copy-btn" onclick="copyCode()">
+                                    <i class="fas fa-copy me-1"></i>复制
+                                </button>
+                            </div>
+                            <div id="classCode" class="code-content">
+                                <pre><code id="classSourceCode" class="language-python"></code></pre>
+                            </div>
+                            <div id="moduleCode" class="code-content d-none">
+                                <pre><code id="moduleSourceCode" class="language-python"></code></pre>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="codeError" class="alert alert-danger mt-4 d-none">
+                        <h5><i class="fas fa-exclamation-triangle me-2"></i>加载失败</h5>
+                        <p id="errorMessage" class="mb-0"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="notification" class="notification"></div>
+
+    <script>
+        let currentType = 'strategy';
+
+        function switchTab(type) {
+            currentType = type;
+            document.querySelectorAll('.nav-tab-item').forEach(t => t.classList.remove('active'));
+            document.getElementById(type === 'strategy' ? 'strategyTypeTab' : 'indicatorTypeTab').classList.add('active');
+
+            document.getElementById('strategySelect').classList.toggle('d-none', type !== 'strategy');
+            document.getElementById('indicatorSelect').classList.toggle('d-none', type !== 'indicator');
+            document.getElementById('codeContainer').style.display = 'none';
+        }
+
+        function loadCode(type) {
+            const name = type === 'strategy'
+                ? document.getElementById('strategySelect').value
+                : document.getElementById('indicatorSelect').value;
+
+            if (!name) return;
+
+            const url = type === 'strategy' ? `/get_strategy_code/${name}` : `/get_indicator_code/${name}`;
+
+            document.getElementById('codeLoading').classList.remove('d-none');
+            document.getElementById('codeContainer').style.display = 'none';
+            document.getElementById('codeError').classList.add('d-none');
+
+            fetch(url)
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('codeLoading').classList.add('d-none');
+                    if (data.success) {
+                        document.getElementById('codeName').textContent = data.data.class_name;
+                        document.getElementById('filePath').textContent = data.data.file_path;
+                        document.getElementById('classSourceCode').textContent = data.data.source_code;
+                        document.getElementById('moduleSourceCode').textContent = data.data.module_source || '无法获取完整模块代码';
+                        hljs.highlightAll();
+                        document.getElementById('codeContainer').style.display = 'block';
+                    } else {
+                        document.getElementById('errorMessage').textContent = data.message;
+                        document.getElementById('codeError').classList.remove('d-none');
+                    }
+                })
+                .catch(err => {
+                    document.getElementById('codeLoading').classList.add('d-none');
+                    document.getElementById('errorMessage').textContent = '加载失败: ' + err.message;
+                    document.getElementById('codeError').classList.remove('d-none');
+                });
+        }
+
+        function switchCodeTab(tab, btn) {
+            document.querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById('classCode').classList.toggle('d-none', tab !== 'class');
+            document.getElementById('moduleCode').classList.toggle('d-none', tab !== 'module');
+        }
+
+        function copyCode() {
+            const code = document.getElementById('classSourceCode').textContent;
+            navigator.clipboard.writeText(code).then(() => {
+                showNotification('代码已复制到剪贴板');
+            });
+        }
+
+        function showNotification(message, type = 'success') {
+            const notification = document.getElementById('notification');
+            notification.textContent = message;
+            notification.className = `notification ${type}`;
+            notification.style.display = 'block';
+            setTimeout(() => notification.style.display = 'none', 3000);
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const params = new URLSearchParams(window.location.search);
+            const strategy = params.get('strategy');
+            const indicator = params.get('indicator');
+
+            if (indicator) {
+                switchTab('indicator');
+                document.getElementById('indicatorSelect').value = indicator;
+                loadCode('indicator');
+            } else if (strategy) {
+                document.getElementById('strategySelect').value = strategy;
+                loadCode('strategy');
+            }
+        });
+    </script>
+</body>
+</html>
