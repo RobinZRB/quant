@@ -3,6 +3,7 @@ import json
 import os
 from datetime import datetime
 from common.logger import create_log
+from settings import project_root
 import random
 
 logger = create_log('task_manager')
@@ -23,11 +24,7 @@ class TaskManager:
         """
         if file_path is None:
             # 使用默认配置文件路径
-            self.file_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                '../config',
-                'scheduled_tasks.json'
-            )
+            self.file_path = str(project_root / 'config' / 'scheduled_tasks.json')
         else:
             self.file_path = file_path
 

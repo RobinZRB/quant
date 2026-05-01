@@ -2,6 +2,7 @@ import json
 import os
 from datetime import datetime
 from common.logger import create_log
+from settings import project_root
 
 logger = create_log('task_execution')
 
@@ -13,11 +14,7 @@ class TaskExecutionManager:
 
     def __init__(self, file_path=None):
         if file_path is None:
-            self.file_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                '../../config',
-                'task_executions.json'
-            )
+            self.file_path = str(project_root / 'config' / 'task_executions.json')
         else:
             self.file_path = file_path
         self._ensure_file_exists()

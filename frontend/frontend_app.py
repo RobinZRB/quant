@@ -10,6 +10,8 @@ sys.path.append(project_root)
 import multiprocessing
 
 import secrets
+import shutil
+import threading
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -43,6 +45,294 @@ logger = create_log('quant_frontend')
 task_manager = TaskManager()
 # 支持的数据源
 DATA_SOURCES = ['akshare', 'baostock', 'futu']
+
+# 批量回测进度管理（参照 manager_batch 的下载进度模式）
+_backtest_progress_store = {}
+_backtest_cancel_events = {}
+
+
+def _generate_backtest_task_id():
+    import random
+    suffix = secrets.token_hex(4)
+    return f"backtest_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{suffix}"
+
+
+def _run_batch_backtest_thread(task_id, source, strategy_name, init_cash,
+                                cut_start, cut_end, resume_old_dir=None):
+    """后台线程：执行批量回测并更新进度"""
+    try:
+        strategy_class = global_strategy_manager.get_strategy(strategy_name)
+        if not strategy_class:
+            _backtest_progress_store[task_id] = {
+                'status': 'failed', 'error': f'无效策略: {strategy_name}'
+            }
+            return
+
+        # 判断是否 resume
+        if resume_old_dir:
+            progress_file = Path(resume_old_dir) / "batch_progress.json"
+            if progress_file.exists():
+                with open(progress_file, 'r', encoding='utf-8') as f:
+                    old_progress = json.load(f)
+                batch_dir = Path(resume_old_dir)
+                all_files = old_progress.get('all_files', [])
+                completed_files = {c['file'] for c in old_progress.get('completed', [])}
+                failed_files = {f['file'] for f in old_progress.get('failed', [])}
+                done_files = completed_files | failed_files
+                init_progress = {
+                    'task_id': task_id,
+                    'status': 'running',
+                    'strategy': strategy_name,
+                    'source': source,
+                    'batch_dir': str(batch_dir),
+                    'init_cash': init_cash,
+                    'total': len(all_files),
+                    'completed_count': len(completed_files),
+                    'failed_count': len(failed_files),
+                    'current_stock': '',
+                    'all_files': all_files,
+                    'completed': old_progress.get('completed', []),
+                    'failed': old_progress.get('failed', []),
+                    'created_at': old_progress.get('created_at', datetime.now().strftime('%Y%m%d_%H%M%S')),
+                    'updated_at': datetime.now().strftime('%Y%m%d_%H%M%S'),
+                }
+                # 重建 all_results 列表
+                all_results = []
+                for c in old_progress.get('completed', []):
+                    r = BacktestResult(csv_path=c.get('file', ''))
+                    r.stock_code = c.get('stock_code', '')
+                    r.stock_name = c.get('stock_name', '')
+                    r.success = True
+                    # 尝试从 metrics.json 恢复更多数据
+                    metrics_file = batch_dir / f"{c.get('stock_code', '')}_{c.get('stock_name', '')}" / "metrics.json"
+                    if metrics_file.exists():
+                        try:
+                            with open(metrics_file, 'r', encoding='utf-8') as mf:
+                                m = json.load(mf)
+                            r.total_return_pct = m.get('total_return_pct', 0)
+                            r.annual_return_pct = m.get('annual_return_pct', 0)
+                            r.max_drawdown_pct = m.get('max_drawdown_pct', 0)
+                            r.sharpe_ratio = m.get('sharpe_ratio', 0)
+                            r.total_trades = m.get('total_trades', 0)
+                            r.won_trades = m.get('won_trades', 0)
+                            r.lost_trades = m.get('lost_trades', 0)
+                            r.win_rate_pct = m.get('win_rate_pct', 0)
+                            r.profit_factor = m.get('profit_factor', 0)
+                            r.avg_holding_days = m.get('avg_holding_days', 0)
+                            r.data_days = m.get('data_days', 0)
+                            r.start_date = m.get('start_date', '')
+                            r.end_date = m.get('end_date', '')
+                            r.final_cash = m.get('final_cash', 0)
+                            r.html_path = m.get('html_path', '')
+                        except Exception:
+                            pass
+                    all_results.append(r)
+
+                folder = Path(source)
+                cut_date_range = (cut_start, cut_end) if cut_start or cut_end else None
+            else:
+                old_progress = None
+                batch_dir = None
+                all_results = []
+                init_progress = None
+                folder = Path(source)
+                cut_date_range = (cut_start, cut_end) if cut_start or cut_end else None
+        else:
+            old_progress = None
+            batch_dir = None
+            all_results = []
+            init_progress = None
+            folder = Path(source)
+            cut_date_range = (cut_start, cut_end) if cut_start or cut_end else None
+
+        cancel_event = threading.Event()
+        _backtest_cancel_events[task_id] = cancel_event
+
+        def progress_cb(processed, total, stock_name):
+            nonlocal init_progress, batch_dir
+            if init_progress is None:
+                init_progress = {
+                    'task_id': task_id,
+                    'status': 'running',
+                    'strategy': strategy_name,
+                    'source': source,
+                    'batch_dir': '',
+                    'init_cash': init_cash,
+                    'total': total,
+                    'completed_count': 0,
+                    'failed_count': 0,
+                    'current_stock': stock_name,
+                    'all_files': [f.name for f in sorted(folder.glob("*.csv"))],
+                    'completed': [],
+                    'failed': [],
+                    'created_at': datetime.now().strftime('%Y%m%d_%H%M%S'),
+                    'updated_at': datetime.now().strftime('%Y%m%d_%H%M%S'),
+                }
+            init_progress['updated_at'] = datetime.now().strftime('%Y%m%d_%H%M%S')
+            init_progress['current_stock'] = stock_name
+            init_progress['total'] = total
+            _backtest_progress_store[task_id] = dict(init_progress)
+
+        run_result = run_backtest_enhanced_volume_strategy_multi(
+            str(folder), strategy_class, init_cash,
+            cut_date_range=cut_date_range,
+            progress_callback=progress_cb,
+            cancel_event=cancel_event,
+        )
+        from core.quant.backtest_result import BacktestResult, aggregate_backtest_results, results_to_csv_data
+
+        result_list, summary, batch_dir_str, cancelled = run_result
+
+        if not resume_old_dir and not old_progress:
+            # 首次运行，从回调中获取 init_progress 来完善
+            pass
+
+        # 更新 progress 中的 completed/failed 列表
+        if init_progress is None:
+            total_files = len(list(folder.glob("*.csv")))
+            init_progress = {
+                'task_id': task_id,
+                'status': 'running',
+                'strategy': strategy_name,
+                'source': source,
+                'batch_dir': batch_dir_str,
+                'init_cash': init_cash,
+                'total': total_files,
+                'completed_count': 0,
+                'failed_count': 0,
+                'current_stock': '',
+                'all_files': [f.name for f in sorted(folder.glob("*.csv"))],
+                'completed': [],
+                'failed': [],
+                'created_at': datetime.now().strftime('%Y%m%d_%H%M%S'),
+                'updated_at': datetime.now().strftime('%Y%m%d_%H%M%S'),
+            }
+
+        init_progress['batch_dir'] = batch_dir_str
+        init_progress['completed_count'] = sum(1 for r in result_list if r.success)
+        init_progress['failed_count'] = sum(1 for r in result_list if not r.success)
+
+        # 建立 file -> (code, name) 映射
+        file_map = {}
+        for r in result_list:
+            if r.csv_path:
+                fname = Path(r.csv_path).name
+                file_map[fname] = (r.stock_code, r.stock_name)
+            elif r.stock_code:
+                file_map[r.stock_code] = (r.stock_code, r.stock_name)
+
+        # 合并已有记录 + 本轮新结果
+        if resume_old_dir and old_progress:
+            new_completed = []
+            new_failed = []
+            for r in result_list:
+                # 找到对应的文件名
+                matched = False
+                for af in init_progress['all_files']:
+                    if af in r.csv_path or (r.stock_code and r.stock_code in af):
+                        entry = {'file': af, 'stock_code': r.stock_code, 'stock_name': r.stock_name}
+                        if r.success:
+                            new_completed.append(entry)
+                        else:
+                            entry['error'] = r.error
+                            new_failed.append(entry)
+                        matched = True
+                        break
+                if not matched:
+                    entry = {'file': r.csv_path, 'stock_code': r.stock_code, 'stock_name': r.stock_name}
+                    if r.success:
+                        new_completed.append(entry)
+                    else:
+                        entry['error'] = r.error
+                        new_failed.append(entry)
+            # 合并：已完成的按 old + new 去重
+            old_completed = old_progress.get('completed', [])
+            old_failed = old_progress.get('failed', [])
+            seen_files = set()
+            merged_completed = []
+            for e in old_completed + new_completed:
+                if e['file'] not in seen_files:
+                    seen_files.add(e['file'])
+                    merged_completed.append(e)
+            seen_failed = set()
+            merged_failed = []
+            for e in old_failed + new_failed:
+                if e['file'] not in seen_failed:
+                    seen_failed.add(e['file'])
+                    merged_failed.append(e)
+            init_progress['completed'] = merged_completed
+            init_progress['failed'] = merged_failed
+            init_progress['completed_count'] = len(merged_completed)
+            init_progress['failed_count'] = len(merged_failed)
+        else:
+            # 非 resume：从 result_list 构建
+            completed_list = []
+            failed_list = []
+            seen_files = set()
+            for r in result_list:
+                fname = Path(r.csv_path).name if r.csv_path else r.stock_code
+                if fname in seen_files:
+                    continue
+                seen_files.add(fname)
+                entry = {'file': fname, 'stock_code': r.stock_code, 'stock_name': r.stock_name}
+                if r.success:
+                    completed_list.append(entry)
+                else:
+                    entry['error'] = r.error
+                    failed_list.append(entry)
+            init_progress['completed'] = completed_list
+            init_progress['failed'] = failed_list
+
+        if cancelled:
+            init_progress['status'] = 'cancelled'
+        else:
+            init_progress['status'] = 'completed'
+
+        init_progress['updated_at'] = datetime.now().strftime('%Y%m%d_%H%M%S')
+        _backtest_progress_store[task_id] = dict(init_progress)
+
+        # 持久化进度 config 到 batch 目录
+        try:
+            progress_dir = Path(batch_dir_str)
+            os.makedirs(progress_dir, exist_ok=True)
+            with open(progress_dir / "batch_progress.json", 'w', encoding='utf-8') as f:
+                json.dump(init_progress, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"保存回测进度文件失败: {e}")
+
+        # 存储最终结果以便前端轮询获取
+        if not cancelled:
+            results_data = []
+            for r in result_list:
+                results_data.append({
+                    'stock_code': r.stock_code,
+                    'stock_name': r.stock_name,
+                    'market': r.market,
+                    'success': r.success,
+                    'total_return_pct': round(r.total_return_pct, 2),
+                    'annual_return_pct': round(r.annual_return_pct, 2),
+                    'max_drawdown_pct': round(r.max_drawdown_pct, 2),
+                    'sharpe_ratio': round(r.sharpe_ratio, 2),
+                    'total_trades': r.total_trades,
+                    'won_trades': r.won_trades,
+                    'lost_trades': r.lost_trades,
+                    'win_rate_pct': round(r.win_rate_pct, 2),
+                    'profit_factor': round(r.profit_factor, 2),
+                    'avg_holding_days': round(r.avg_holding_days, 1),
+                    'error': r.error,
+                })
+            init_progress['results'] = results_data
+            init_progress['summary'] = summary
+            _backtest_progress_store[task_id] = dict(init_progress)
+
+    except Exception as e:
+        logger.error(f"批量回测线程异常: {str(e)}", exc_info=True)
+        _backtest_progress_store[task_id] = {
+            'status': 'failed',
+            'error': str(e),
+        }
+    finally:
+        _backtest_cancel_events.pop(task_id, None)
 
 
 def log_request_details(f):
@@ -208,7 +498,7 @@ def run_backtest():
             cut_start = data.get('cut_start', None)
             cut_end = data.get('cut_end', None)
             cut_date_range = (cut_start, cut_end) if cut_start or cut_end else None
-            result_list, summary, batch_dir = run_backtest_enhanced_volume_strategy_multi(
+            result_list, summary, batch_dir, _ = run_backtest_enhanced_volume_strategy_multi(
                 str(folder_path), strategy_class, init_cash, cut_date_range=cut_date_range
             )
             response_data = {
@@ -282,6 +572,127 @@ def run_backtest():
         error_response = make_response(json.dumps(error_response_data, ensure_ascii=False))
         error_response.headers['Content-Type'] = 'application/json; charset=utf-8'
         return error_response
+
+@app.route('/run_backtest_async', methods=['POST'])
+@log_request_details
+def run_backtest_async():
+    """异步启动批量回测，立即返回 task_id"""
+    try:
+        data = request.json
+        source = data.get('source')
+        is_batch = data.get('is_batch', False)
+        init_cash = float(data.get('init_cash', 5000000))
+        strategy_name = data.get('strategy')
+        cut_start = data.get('cut_start', None)
+        cut_end = data.get('cut_end', None)
+        resume_task_id = data.get('resume_task_id', None)
+
+        if not is_batch:
+            return _json_response({'success': False, 'message': '异步接口仅支持批量回测'})
+
+        strategy_class = global_strategy_manager.get_strategy(strategy_name)
+        if not strategy_class:
+            return _json_response({'success': False, 'message': f'无效策略: {strategy_name}'})
+
+        if source not in DATA_SOURCES:
+            return _json_response({'success': False, 'message': f'无效数据源: {source}'})
+
+        # 检查 resume
+        resume_old_dir = None
+        if resume_task_id:
+            old_progress = _backtest_progress_store.get(resume_task_id)
+            if old_progress and old_progress.get('batch_dir'):
+                resume_old_dir = old_progress['batch_dir']
+            else:
+                # 尝试从持久化文件读取
+                pass
+
+        task_id = _generate_backtest_task_id()
+        logger.info(f"启动异步批量回测: task_id={task_id}, source={source}, strategy={strategy_name}")
+
+        thread = threading.Thread(
+            target=_run_batch_backtest_thread,
+            args=(task_id, str(stock_data_root / source), strategy_name, init_cash,
+                  cut_start, cut_end, resume_old_dir),
+            daemon=True,
+        )
+        thread.start()
+
+        return _json_response({
+            'success': True,
+            'message': '批量回测已异步启动',
+            'data': {'task_id': task_id, 'source': source, 'strategy': strategy_name},
+        })
+    except Exception as e:
+        logger.error(f"启动异步回测失败: {str(e)}")
+        return _json_response({'success': False, 'message': f'启动失败: {str(e)}'})
+
+
+@app.route('/api/backtest_progress/<task_id>', methods=['GET'])
+@log_request_details
+def get_backtest_progress(task_id):
+    """轮询批量回测进度"""
+    progress = _backtest_progress_store.get(task_id)
+    if not progress:
+        return _json_response({'success': False, 'message': '任务不存在或已过期', 'data': {'status': 'not_found'}})
+    return _json_response({'success': True, 'message': 'OK', 'data': progress})
+
+
+@app.route('/api/backtest_cancel/<task_id>', methods=['POST'])
+@log_request_details
+def cancel_backtest(task_id):
+    """取消批量回测"""
+    cancel_event = _backtest_cancel_events.get(task_id)
+    if cancel_event:
+        cancel_event.set()
+        logger.info(f"已发送取消信号: task_id={task_id}")
+        return _json_response({'success': True, 'message': '已发送取消信号'})
+    # 也检查持久化
+    progress = _backtest_progress_store.get(task_id)
+    if progress and progress.get('status') in ('completed', 'cancelled', 'failed'):
+        return _json_response({'success': False, 'message': '任务已结束'})
+    return _json_response({'success': False, 'message': '任务不存在或已结束'})
+
+
+@app.route('/api/backtest_clear', methods=['POST'])
+@log_request_details
+def clear_backtest_result():
+    """清空当前回测结果目录"""
+    try:
+        data = request.json
+        batch_dir = data.get('batch_dir', '')
+        task_id = data.get('task_id', '')
+
+        if not batch_dir:
+            return _json_response({'success': False, 'message': '缺少 batch_dir'})
+
+        # 先取消（如果还在运行）
+        if task_id:
+            cancel_event = _backtest_cancel_events.get(task_id)
+            if cancel_event:
+                cancel_event.set()
+
+        abs_path = Path(batch_dir)
+        if abs_path.exists() and abs_path.is_dir():
+            shutil.rmtree(abs_path)
+            logger.info(f"已清空回测结果目录: {batch_dir}")
+
+        # 清理内存
+        if task_id:
+            _backtest_progress_store.pop(task_id, None)
+            _backtest_cancel_events.pop(task_id, None)
+
+        return _json_response({'success': True, 'message': '已清空回测结果数据'})
+    except Exception as e:
+        logger.error(f"清空回测结果失败: {str(e)}")
+        return _json_response({'success': False, 'message': f'清空失败: {str(e)}'})
+
+
+def _json_response(data, status_code=200):
+    r = make_response(json.dumps(data, ensure_ascii=False))
+    r.headers['Content-Type'] = 'application/json; charset=utf-8'
+    return r, status_code
+
 
 @app.route('/api/music/list', methods=['GET'])
 @log_request_details
@@ -426,7 +837,7 @@ def serve_static(filename):
 @log_request_details
 def serve_html(filename):
     """提供HTML结果文件服务"""
-    return send_from_directory('../html', filename)
+    return send_from_directory(str(html_root), filename)
 
 
 @app.route('/acquire_stock_data', methods=['POST'])

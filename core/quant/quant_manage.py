@@ -100,7 +100,9 @@ def run_backtest_enhanced_volume_strategy_multi(
     kline_csv_folder_path,
     trading_strategy: bt.Strategy,
     init_cash=settings.INIT_CASH,
-    cut_date_range=None
+    cut_date_range=None,
+    progress_callback=None,
+    cancel_event=None,
 ):
     """
     批量运行增强成交量策略回测，汇总统计
@@ -108,7 +110,9 @@ def run_backtest_enhanced_volume_strategy_multi(
     :param trading_strategy: 交易策略类
     :param init_cash: 初始资金
     :param cut_date_range: 可选 (fromdate, todate) 统一起止日期
-    :return: (results_list, summary_dict)
+    :param progress_callback: 可选回调 func(processed, total, current_stock_name)
+    :param cancel_event: 可选 threading.Event，set() 时提前退出
+    :return: (results_list, summary_dict, batch_result_dir_str, cancelled_bool)
     """
     batch_timestamp = get_current_time()
     strategy_name = trading_strategy.__name__
@@ -130,9 +134,19 @@ def run_backtest_enhanced_volume_strategy_multi(
 
     all_results = []
     batch_result_dir = settings.result_root / strategy_name / batch_timestamp
+    cancelled = False
 
     for idx, csv_path in enumerate(csv_files):
+        if cancel_event and cancel_event.is_set():
+            logger.info(f"【批量回测取消】第 {idx + 1}/{total_files} 处停止")
+            cancelled = True
+            break
+
         logger.info(f"\n>>> [{idx + 1}/{total_files}] 回测: {csv_path.name}")
+
+        if progress_callback:
+            progress_callback(idx + 1, total_files, csv_path.name)
+
         result = run_backtest_enhanced_volume_strategy(
             csv_path, trading_strategy, init_cash,
             batch_timestamp=batch_timestamp,
@@ -141,28 +155,38 @@ def run_backtest_enhanced_volume_strategy_multi(
         )
         all_results.append(result)
 
-    summary = aggregate_backtest_results(all_results)
+    if all_results:
+        summary = aggregate_backtest_results(all_results)
+    else:
+        summary = {}
 
     # save batch summary CSV
     try:
         os.makedirs(batch_result_dir, exist_ok=True)
         csv_rows = results_to_csv_data(all_results)
-        batch_csv_path = batch_result_dir / "batch_summary.csv"
-        pd.DataFrame(csv_rows).to_csv(batch_csv_path, index=False, encoding='utf-8-sig')
-        logger.info(f"批量汇总表已保存: {batch_csv_path}")
+        if csv_rows:
+            batch_csv_path = batch_result_dir / "batch_summary.csv"
+            pd.DataFrame(csv_rows).to_csv(batch_csv_path, index=False, encoding='utf-8-sig')
+            logger.info(f"批量汇总表已保存: {batch_csv_path}")
 
-        summary_path = batch_result_dir / "summary.json"
-        with open(summary_path, 'w', encoding='utf-8') as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
-        logger.info(f"汇总JSON已保存: {summary_path}")
+        if summary:
+            summary_path = batch_result_dir / "summary.json"
+            with open(summary_path, 'w', encoding='utf-8') as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2)
+            logger.info(f"汇总JSON已保存: {summary_path}")
     except Exception as e:
         logger.warning(f"保存汇总文件失败: {e}")
 
-    logger.info("=" * 60)
-    logger.info("【批量回测全部完成】")
-    logger.info("=" * 60)
+    if cancelled:
+        logger.info("=" * 60)
+        logger.info("【批量回测被取消】")
+        logger.info("=" * 60)
+    else:
+        logger.info("=" * 60)
+        logger.info("【批量回测全部完成】")
+        logger.info("=" * 60)
 
-    return all_results, summary, str(batch_result_dir)
+    return all_results, summary, str(batch_result_dir), cancelled
 
 
 def run_backtest_enhanced_volume_strategy(

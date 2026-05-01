@@ -12,12 +12,12 @@ def get_project_root():
 
 
 project_root = get_project_root()
-data_root = project_root / 'data'
+data_root = project_root.parent / 'quant_data' / 'data'
 stock_data_root = data_root / 'stock'
-log_root = project_root / 'log'
-html_root = project_root / 'html'
-result_root = project_root / 'results'
-signals_root = project_root / 'signals'
+log_root = project_root.parent / 'quant_logs' / 'log'
+html_root = project_root.parent / 'quant_data' / 'html'
+result_root = project_root.parent / 'quant_data' / 'results'
+signals_root = project_root.parent / 'quant_data' / 'signals'
 # chart_show_switch = False
 
 

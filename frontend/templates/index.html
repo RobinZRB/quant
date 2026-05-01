@@ -208,6 +208,20 @@
                                 </div>
                             </div>
                         </form>
+                        <div id="backtestProgressArea" class="mt-3" style="display:none;">
+                            <div id="backtestProgressContent"></div>
+                            <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+                                <button type="button" id="backtestCancelBtn" class="modern-btn modern-btn-danger" onclick="cancelBatchBacktest()">
+                                    <i class="fas fa-stop"></i> 取消回测
+                                </button>
+                                <button type="button" id="backtestResumeBtn" class="modern-btn modern-btn-secondary" onclick="resumeBatchBacktest()" style="display:none;">
+                                    <i class="fas fa-redo"></i> 继续回测
+                                </button>
+                                <button type="button" id="backtestClearBtn" class="modern-btn modern-btn-danger" onclick="clearBatchBacktest()" style="display:none;">
+                                    <i class="fas fa-trash"></i> 清空结果
+                                </button>
+                            </div>
+                        </div>
                         <div id="resultMessage" class="mt-3"></div>
                         <div id="resultView" class="mt-3"></div>
                         <div id="batchResultView" class="mt-3" style="display:none;"></div>
@@ -622,14 +636,9 @@
             const resultMessage = document.getElementById('resultMessage');
             const resultView = document.getElementById('resultView');
             const batchResultView = document.getElementById('batchResultView');
+            const progressArea = document.getElementById('backtestProgressArea');
             const isBatch = document.getElementById('batchTest').checked;
 
-            resultMessage.innerHTML = `
-                <div class="result-message info">
-                    <i class="fas fa-spinner fa-spin"></i>
-                    <span>回测正在进行中，请稍候...</span>
-                </div>
-            `;
             resultView.innerHTML = '';
             batchResultView.innerHTML = '';
             batchResultView.style.display = 'none';
@@ -641,64 +650,58 @@
                 init_cash: document.getElementById('initCash').value,
                 strategy: document.getElementById('strategy').value
             };
+
             if (isBatch) {
                 body.cut_start = document.getElementById('cutStart').value || null;
                 body.cut_end = document.getElementById('cutEnd').value || null;
-            }
 
-            fetch('/run_backtest', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    if (isBatch && data.data.summary) {
-                        const s = data.data.summary;
-                        resultMessage.innerHTML = `
-                            <div class="result-message success">
-                                <i class="fas fa-check-circle"></i>
-                                <span>批量回测完成: ${s.success_count}/${s.stock_count} 成功</span>
-                            </div>
-                        `;
-                        let summaryHtml = '<div class="table-container mt-3"><div class="table-header-custom"><div class="table-title"><i class="fas fa-chart-pie"></i>批量汇总统计</div></div>';
-                        summaryHtml += '<div class="stats-row">';
-                        summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon blue"><i class="fas fa-percent"></i></div><div><div class="mini-stat-value">${s.weighted_win_rate_pct}%</div><div class="mini-stat-label">加权胜率</div></div></div>`;
-                        summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon green"><i class="fas fa-balance-scale"></i></div><div><div class="mini-stat-value">${s.weighted_profit_factor}</div><div class="mini-stat-label">加权盈亏比</div></div></div>`;
-                        summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon orange"><i class="fas fa-exchange-alt"></i></div><div><div class="mini-stat-value">${s.total_trades_all}</div><div class="mini-stat-label">总交易次数</div></div></div>`;
-                        summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon purple"><i class="fas fa-calendar-alt"></i></div><div><div class="mini-stat-value">${s.avg_trades_per_year}</div><div class="mini-stat-label">年均交易次数</div></div></div>`;
-                        summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon green"><i class="fas fa-clock"></i></div><div><div class="mini-stat-value">${s.avg_holding_days}天</div><div class="mini-stat-label">平均持仓天数</div></div></div>`;
-                        if (s.equal_weight) {
-                            summaryHtml += `<div class="mini-stat"><div class="mini-stat-icon blue"><i class="fas fa-chart-line"></i></div><div><div class="mini-stat-value">${s.equal_weight.avg_annual_return_pct}%</div><div class="mini-stat-label">等权年化收益</div></div></div>`;
-                        }
-                        summaryHtml += '</div>';
-                        if (data.data.batch_dir) {
-                            summaryHtml += `<div style="padding:12px;font-size:13px;color:#b0b0b0;">结果目录: ${data.data.batch_dir}</div>`;
-                        }
-                        summaryHtml += '</div>';
+                // 异步批量回测
+                resultMessage.innerHTML = '';
+                document.getElementById('backtestProgressArea').style.display = 'block';
+                document.getElementById('backtestProgressContent').innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在启动批量回测...';
+                document.getElementById('backtestCancelBtn').style.display = 'inline-block';
+                document.getElementById('backtestResumeBtn').style.display = 'none';
+                document.getElementById('backtestClearBtn').style.display = 'none';
 
-                        // per-stock table
-                        if (data.data.results && data.data.results.length > 0) {
-                            summaryHtml += '<div class="table-container mt-3"><div class="table-header-custom"><div class="table-title"><i class="fas fa-list"></i>各股票明细</div></div>';
-                            summaryHtml += '<div class="table-responsive"><table class="data-table-custom"><thead><tr>';
-                            ['代码','名称','收益%','回撤%','交易','胜率%','盈亏比','持仓天','状态'].forEach(h => summaryHtml += `<th>${h}</th>`);
-                            summaryHtml += '</tr></thead><tbody>';
-                            data.data.results.forEach(r => {
-                                const color = r.total_return_pct >= 0 ? '#ff6b6b' : '#4ecdc4';
-                                summaryHtml += `<tr>
-                                    <td>${r.stock_code}</td><td>${r.stock_name}</td>
-                                    <td style="color:${color}">${r.total_return_pct}%</td><td>${r.max_drawdown_pct}%</td>
-                                    <td>${r.total_trades}</td><td>${r.win_rate_pct}%</td><td>${r.profit_factor}</td>
-                                    <td>${r.avg_holding_days}</td><td>${r.success ? '<span style="color:#2ecc71">✓</span>' : '<span style="color:#e74c3c">✗</span>'}</td>
-                                </tr>`;
-                            });
-                            summaryHtml += '</tbody></table></div></div>';
-                        }
-                        batchResultView.innerHTML = summaryHtml;
-                        batchResultView.style.display = 'block';
-                        scrollToSection('backtest');
+                fetch('/run_backtest_async', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        currentBacktestTaskId = data.data.task_id;
+                        localStorage.setItem('lastBacktestTaskId', currentBacktestTaskId);
+                        startBacktestPolling(currentBacktestTaskId);
                     } else {
+                        document.getElementById('backtestProgressContent').innerHTML =
+                            `<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> ${data.message}</span>`;
+                        document.getElementById('backtestCancelBtn').style.display = 'none';
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('backtestProgressContent').innerHTML =
+                        `<span style="color:#e74c3c;"><i class="fas fa-exclamation-triangle"></i> 启动失败: ${error.message}</span>`;
+                    document.getElementById('backtestCancelBtn').style.display = 'none';
+                });
+            } else {
+                // 单股票同步回测
+                resultMessage.innerHTML = `
+                    <div class="result-message info">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <span>回测正在进行中，请稍候...</span>
+                    </div>
+                `;
+
+                fetch('/run_backtest', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
                         resultMessage.innerHTML = `
                             <div class="result-message success">
                                 <i class="fas fa-check-circle"></i>
@@ -723,26 +726,250 @@
                                 </div>
                             `;
                         }
+                        loadResults(1);
+                    } else {
+                        resultMessage.innerHTML = `
+                            <div class="result-message error">
+                                <i class="fas fa-times-circle"></i>
+                                <span>${data.message}</span>
+                            </div>
+                        `;
                     }
-                    loadResults(1);
-                } else {
+                })
+                .catch(error => {
                     resultMessage.innerHTML = `
                         <div class="result-message error">
-                            <i class="fas fa-times-circle"></i>
-                            <span>${data.message}</span>
+                            <i class="fas fa-exclamation-triangle"></i>
+                            <span>回测失败</span>
                         </div>
                     `;
+                });
+            }
+        });
+
+        // === Batch backtest progress polling ===
+        function startBacktestPolling(taskId) {
+            if (backtestPollTimer) clearInterval(backtestPollTimer);
+            backtestPollTimer = setInterval(() => pollBacktestProgress(taskId), 1000);
+        }
+
+        function renderBatchResults(results, summary, batchDir) {
+            const batchResultView = document.getElementById('batchResultView');
+            const s = summary;
+            let html = '<div class="table-container mt-1"><div class="table-header-custom"><div class="table-title"><i class="fas fa-chart-pie"></i>批量汇总统计</div></div>';
+            html += '<div class="stats-row">';
+            html += '<div class="mini-stat"><div class="mini-stat-icon blue"><i class="fas fa-percent"></i></div><div><div class="mini-stat-value">' + s.weighted_win_rate_pct + '%</div><div class="mini-stat-label">加权胜率</div></div></div>';
+            html += '<div class="mini-stat"><div class="mini-stat-icon green"><i class="fas fa-balance-scale"></i></div><div><div class="mini-stat-value">' + s.weighted_profit_factor + '</div><div class="mini-stat-label">加权盈亏比</div></div></div>';
+            html += '<div class="mini-stat"><div class="mini-stat-icon orange"><i class="fas fa-exchange-alt"></i></div><div><div class="mini-stat-value">' + s.total_trades_all + '</div><div class="mini-stat-label">总交易次数</div></div></div>';
+            html += '<div class="mini-stat"><div class="mini-stat-icon purple"><i class="fas fa-calendar-alt"></i></div><div><div class="mini-stat-value">' + s.avg_trades_per_year + '</div><div class="mini-stat-label">年均交易次数</div></div></div>';
+            html += '<div class="mini-stat"><div class="mini-stat-icon green"><i class="fas fa-clock"></i></div><div><div class="mini-stat-value">' + s.avg_holding_days + '天</div><div class="mini-stat-label">平均持仓天数</div></div></div>';
+            if (s.equal_weight) {
+                html += '<div class="mini-stat"><div class="mini-stat-icon blue"><i class="fas fa-chart-line"></i></div><div><div class="mini-stat-value">' + s.equal_weight.avg_annual_return_pct + '%</div><div class="mini-stat-label">等权年化收益</div></div></div>';
+            }
+            html += '</div>';
+            if (batchDir) {
+                html += '<div style="padding:12px;font-size:13px;color:#b0b0b0;">结果目录: ' + batchDir + '</div>';
+            }
+            html += '</div>';
+
+            if (results && results.length > 0) {
+                html += '<div class="table-container mt-3"><div class="table-header-custom"><div class="table-title"><i class="fas fa-list"></i>各股票明细</div></div>';
+                html += '<div class="table-responsive"><table class="data-table-custom"><thead><tr>';
+                ['代码','名称','收益%','回撤%','交易','胜率%','盈亏比','持仓天','状态'].forEach(function(h) { html += '<th>' + h + '</th>'; });
+                html += '</tr></thead><tbody>';
+                results.forEach(function(r) {
+                    const color = r.total_return_pct >= 0 ? '#ff6b6b' : '#4ecdc4';
+                    html += '<tr><td>' + r.stock_code + '</td><td>' + r.stock_name + '</td><td style="color:' + color + '">' + r.total_return_pct + '%</td><td>' + r.max_drawdown_pct + '%</td><td>' + r.total_trades + '</td><td>' + r.win_rate_pct + '%</td><td>' + r.profit_factor + '</td><td>' + r.avg_holding_days + '</td><td>' + (r.success ? '<span style="color:#2ecc71">✓</span>' : '<span style="color:#e74c3c">✗</span>') + '</td></tr>';
+                });
+                html += '</tbody></table></div></div>';
+            }
+            batchResultView.innerHTML = html;
+            batchResultView.style.display = 'block';
+            scrollToSection('backtest');
+        }
+
+        function pollBacktestProgress(taskId) {
+            fetch('/api/backtest_progress/' + taskId + '?_t=' + Date.now())
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) {
+                        clearInterval(backtestPollTimer);
+                        backtestPollTimer = null;
+                        document.getElementById('backtestProgressContent').innerHTML =
+                            '<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> ' + data.message + '</span>';
+                        return;
+                    }
+                    const p = data.data;
+                    const pct = p.total > 0 ? Math.round((p.completed_count + p.failed_count) / p.total * 100) : 0;
+                    const doneCount = (p.completed_count || 0) + (p.failed_count || 0);
+                    const progressContent = document.getElementById('backtestProgressContent');
+                    const cancelBtn = document.getElementById('backtestCancelBtn');
+                    const resumeBtn = document.getElementById('backtestResumeBtn');
+                    const clearBtn = document.getElementById('backtestClearBtn');
+
+                    let html = '<div style="margin:8px 0;">';
+
+                    if (p.status === 'running') {
+                        html += '<div style="display:flex;justify-content:space-between;font-size:13px;color:#b0b0b0;">';
+                        html += '<span><i class="fas fa-spinner fa-spin"></i> 回测中</span>';
+                        html += '<span>' + doneCount + '/' + p.total + ' (' + pct + '%) 成功:' + (p.completed_count || 0) + ' 失败:' + (p.failed_count || 0) + '</span>';
+                        html += '</div>';
+                        html += '<div style="background:#333;border-radius:4px;height:8px;margin-top:4px;overflow:hidden;">';
+                        html += '<div style="background:linear-gradient(90deg,#667eea,#764ba2);height:100%;width:' + pct + '%;transition:width 0.3s;"></div>';
+                        html += '</div>';
+                        if (p.current_stock) {
+                            html += '<div style="font-size:12px;color:#888;margin-top:4px;">当前: ' + p.current_stock + '</div>';
+                        }
+                        currentBacktestDir = p.batch_dir || currentBacktestDir;
+                        cancelBtn.style.display = 'inline-block';
+                        resumeBtn.style.display = 'none';
+                        clearBtn.style.display = 'none';
+                    } else if (p.status === 'completed') {
+                        html += '<div style="display:flex;justify-content:space-between;font-size:13px;color:#2ecc71;">';
+                        html += '<span><i class="fas fa-check-circle"></i> 回测完成</span>';
+                        html += '<span>' + doneCount + '/' + p.total + ' (' + pct + '%) 成功:' + (p.completed_count || 0) + ' 失败:' + (p.failed_count || 0) + '</span>';
+                        html += '</div>';
+                        html += '<div style="background:#333;border-radius:4px;height:8px;margin-top:4px;overflow:hidden;">';
+                        html += '<div style="background:#2ecc71;height:100%;width:100%;"></div>';
+                        html += '</div>';
+                        cancelBtn.style.display = 'none';
+                        resumeBtn.style.display = 'none';
+                        clearBtn.style.display = 'inline-block';
+                        currentBacktestDir = p.batch_dir || currentBacktestDir;
+
+                        clearInterval(backtestPollTimer);
+                        backtestPollTimer = null;
+                        localStorage.removeItem('lastBacktestTaskId');
+
+                        // 渲染结果
+                        if (p.results && p.summary) {
+                            renderBatchResults(p.results, p.summary, currentBacktestDir);
+                        }
+                    } else if (p.status === 'cancelled') {
+                        html += '<div style="display:flex;justify-content:space-between;font-size:13px;color:#f39c12;">';
+                        html += '<span><i class="fas fa-stop-circle"></i> 已取消</span>';
+                        html += '<span>' + doneCount + '/' + p.total + ' (' + pct + '%) 成功:' + (p.completed_count || 0) + ' 失败:' + (p.failed_count || 0) + '</span>';
+                        html += '</div>';
+                        html += '<div style="background:#333;border-radius:4px;height:8px;margin-top:4px;overflow:hidden;">';
+                        html += '<div style="background:#f39c12;height:100%;width:' + pct + '%;"></div>';
+                        html += '</div>';
+                        cancelBtn.style.display = 'none';
+                        resumeBtn.style.display = 'inline-block';
+                        clearBtn.style.display = 'inline-block';
+                        currentBacktestDir = p.batch_dir || currentBacktestDir;
+
+                        clearInterval(backtestPollTimer);
+                        backtestPollTimer = null;
+                        localStorage.setItem('lastBacktestTaskId', taskId);
+                    } else if (p.status === 'failed') {
+                        html += '<div style="font-size:13px;color:#e74c3c;">';
+                        html += '<i class="fas fa-times-circle"></i> 回测失败: ' + (p.error || '未知错误');
+                        html += '</div>';
+                        cancelBtn.style.display = 'none';
+                        resumeBtn.style.display = 'none';
+                        clearBtn.style.display = 'inline-block';
+                        clearInterval(backtestPollTimer);
+                        backtestPollTimer = null;
+                        localStorage.removeItem('lastBacktestTaskId');
+                    }
+
+                    html += '</div>';
+                    progressContent.innerHTML = html;
+                })
+                .catch(function(e) {
+                    clearInterval(backtestPollTimer);
+                    backtestPollTimer = null;
+                });
+        }
+
+        function cancelBatchBacktest() {
+            if (!currentBacktestTaskId) return;
+            document.getElementById('backtestProgressContent').innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在取消...';
+            fetch('/api/backtest_cancel/' + currentBacktestTaskId, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('backtestProgressContent').innerHTML = '<span style="color:#f39c12;"><i class="fas fa-stop-circle"></i> 已发送取消信号</span>';
+                    }
+                });
+        }
+
+        function resumeBatchBacktest() {
+            if (!currentBacktestTaskId) return;
+            const progressContent = document.getElementById('backtestProgressContent');
+            progressContent.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在继续回测...';
+            document.getElementById('backtestResumeBtn').style.display = 'none';
+            document.getElementById('backtestClearBtn').style.display = 'none';
+
+            const body = {
+                source: document.getElementById('dataSource').value,
+                is_batch: true,
+                init_cash: document.getElementById('initCash').value,
+                strategy: document.getElementById('strategy').value,
+                cut_start: document.getElementById('cutStart').value || null,
+                cut_end: document.getElementById('cutEnd').value || null,
+                resume_task_id: currentBacktestTaskId
+            };
+
+            fetch('/run_backtest_async', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    currentBacktestTaskId = data.data.task_id;
+                    localStorage.setItem('lastBacktestTaskId', currentBacktestTaskId);
+                    startBacktestPolling(currentBacktestTaskId);
+                } else {
+                    progressContent.innerHTML = '<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> ' + data.message + '</span>';
                 }
             })
-            .catch(error => {
-                resultMessage.innerHTML = `
-                    <div class="result-message error">
-                        <i class="fas fa-exclamation-triangle"></i>
-                        <span>回测失败</span>
-                    </div>
-                `;
+            .catch(function(e) {
+                progressContent.innerHTML = '<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> 继续失败: ' + e.message + '</span>';
             });
-        });
+        }
+
+        function clearBatchBacktest() {
+            if (!currentBacktestDir && !currentBacktestTaskId) return;
+            const progressContent = document.getElementById('backtestProgressContent');
+
+            if (!confirm('确定清空当前回测结果数据？此操作不可恢复。')) return;
+
+            progressContent.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在清空...';
+            fetch('/api/backtest_clear', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    batch_dir: currentBacktestDir,
+                    task_id: currentBacktestTaskId
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    document.getElementById('backtestProgressArea').style.display = 'none';
+                    document.getElementById('batchResultView').innerHTML = '';
+                    document.getElementById('batchResultView').style.display = 'none';
+                    document.getElementById('resultMessage').innerHTML = `
+                        <div class="result-message info">
+                            <i class="fas fa-info-circle"></i>
+                            <span>已清空回测结果，下次点击开始回测将是全新一轮</span>
+                        </div>
+                    `;
+                    currentBacktestTaskId = null;
+                    currentBacktestDir = null;
+                    localStorage.removeItem('lastBacktestTaskId');
+                    loadResults(1);
+                } else {
+                    progressContent.innerHTML = '<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> ' + data.message + '</span>';
+                }
+            })
+            .catch(function(e) {
+                progressContent.innerHTML = '<span style="color:#e74c3c;"><i class="fas fa-times-circle"></i> 清空失败: ' + e.message + '</span>';
+            });
+        }
 
         let filterTimeout;
 
@@ -849,6 +1076,11 @@
             document.getElementById('dateFilterEnd').value = '';
             loadResults(1);
         }
+
+        // === Batch backtest progress ===
+        let currentBacktestTaskId = null;
+        let currentBacktestDir = null;
+        let backtestPollTimer = null;
 
         // === Batch A-share download ===
         let downloadedStockConfigs = [];
@@ -1155,6 +1387,51 @@
                             localStorage.removeItem('lastDownloadTaskId');
                             document.getElementById('batchDownloadProgress').innerHTML = `<div style="color:#2ecc71;"><i class="fas fa-check-circle"></i> 上次下载已完成: ${data.data.success}/${data.data.total} 成功</div>`;
                         }
+                    });
+            }
+
+            // 检查未完成的批量回测任务
+            const savedBacktestId = localStorage.getItem('lastBacktestTaskId');
+            if (savedBacktestId) {
+                fetch(`/api/backtest_progress/${savedBacktestId}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.success && data.data) {
+                            const p = data.data;
+                            if (p.status === 'running') {
+                                currentBacktestTaskId = savedBacktestId;
+                                currentBacktestDir = p.batch_dir || '';
+                                document.getElementById('backtestProgressArea').style.display = 'block';
+                                document.getElementById('backtestProgressContent').innerHTML = '<div style="color:#f39c12;"><i class="fas fa-exclamation-triangle"></i> 检测到未完成的回测任务，点击"继续回测"恢复</div>';
+                                document.getElementById('backtestCancelBtn').style.display = 'none';
+                                document.getElementById('backtestResumeBtn').style.display = 'inline-block';
+                                document.getElementById('backtestClearBtn').style.display = 'inline-block';
+                            } else if (p.status === 'cancelled') {
+                                currentBacktestTaskId = savedBacktestId;
+                                currentBacktestDir = p.batch_dir || '';
+                                document.getElementById('backtestProgressArea').style.display = 'block';
+                                document.getElementById('backtestProgressContent').innerHTML = `<div style="color:#f39c12;"><i class="fas fa-exclamation-triangle"></i> 上次回测已取消 (${(p.completed_count||0)+(p.failed_count||0)}/${p.total})，可继续或清空</div>`;
+                                document.getElementById('backtestCancelBtn').style.display = 'none';
+                                document.getElementById('backtestResumeBtn').style.display = 'inline-block';
+                                document.getElementById('backtestClearBtn').style.display = 'inline-block';
+                            } else if (p.status === 'completed') {
+                                localStorage.removeItem('lastBacktestTaskId');
+                                document.getElementById('backtestProgressArea').style.display = 'block';
+                                document.getElementById('backtestProgressContent').innerHTML = `<div style="color:#2ecc71;"><i class="fas fa-check-circle"></i> 上次回测已完成: ${p.completed_count}/${p.total} 成功</div>`;
+                                document.getElementById('backtestCancelBtn').style.display = 'none';
+                                document.getElementById('backtestResumeBtn').style.display = 'none';
+                                document.getElementById('backtestClearBtn').style.display = 'inline-block';
+                                currentBacktestDir = p.batch_dir || '';
+                                if (p.results && p.summary) {
+                                    renderBatchResults(p.results, p.summary, currentBacktestDir);
+                                }
+                            }
+                        } else {
+                            localStorage.removeItem('lastBacktestTaskId');
+                        }
+                    })
+                    .catch(() => {
+                        localStorage.removeItem('lastBacktestTaskId');
                     });
             }
         })();
